@@ -55,9 +55,10 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
-#publish-btn {
+.controls button {
   border: 1px solid #4f4f4f;
   background: #1c1c1c;
   color: #f2f2f2;
@@ -66,11 +67,64 @@ body {
   cursor: pointer;
 }
 
-#publish-btn:hover {
+.controls button:hover {
   background: #2a2a2a;
+}
+
+.controls button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 #publish-status {
   color: #afafaf;
   font-size: 0.82rem;
+}
+
+.publish-log {
+  margin: 10px 0 0;
+  padding: 8px;
+  min-height: 72px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid #2b2b2b;
+  background: #0a0a0a;
+  color: #bdbdbd;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+
+.link-panel {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #2b2b2b;
+  background: #0c0c0c;
+  border-radius: 6px;
+}
+
+.hidden {
+  display: none;
+}
+
+.link-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.link-grid input {
+  width: 100%;
+  border: 1px solid #3b3b3b;
+  background: #111;
+  color: #e7e7e7;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+.link-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }

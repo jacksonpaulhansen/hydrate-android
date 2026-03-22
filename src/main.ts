@@ -16,6 +16,7 @@ type AppState = {
   lastInput: InputAction | 'NONE';
   connection: 'connecting' | 'hub' | 'browser';
   publishStatus: string;
+  linkOpen: boolean;
 };
 
 const MODES = ['HELLO G2', 'READY', 'SIMULATOR'];
@@ -28,6 +29,7 @@ const state: AppState = {
   lastInput: 'NONE',
   connection: 'connecting',
   publishStatus: 'IDLE',
+  linkOpen: false,
 };
 
 let bridge: EvenAppBridge | null = null;
@@ -43,15 +45,39 @@ app.innerHTML = `
     <pre id="hud-preview" class="hud-preview"></pre>
     <div class="controls">
       <button id="publish-btn" type="button">Publish</button>
+      <button id="link-btn" type="button">Link Git/Repo</button>
+      <button id="reboot-btn" type="button">Reboot App</button>
       <span id="publish-status">IDLE</span>
     </div>
+    <section id="link-panel" class="link-panel hidden">
+      <div class="link-grid">
+        <input id="gh-user" placeholder="GitHub user" />
+        <input id="gh-repo" placeholder="Repo name" />
+      </div>
+      <div class="link-actions">
+        <button id="gh-login-btn" type="button">Open GitHub Login</button>
+        <button id="gh-new-btn" type="button">Open Create Repo</button>
+        <button id="save-link-btn" type="button">Save Link</button>
+      </div>
+    </section>
+    <pre id="publish-log" class="publish-log"></pre>
     <p class="hint">Keyboard fallback: Enter=click, D=double-click, ArrowUp/ArrowDown</p>
   </main>
 `;
 
 const hudPreview = document.querySelector<HTMLPreElement>('#hud-preview')!;
 const publishBtn = document.querySelector<HTMLButtonElement>('#publish-btn')!;
+const linkBtn = document.querySelector<HTMLButtonElement>('#link-btn')!;
+const rebootBtn = document.querySelector<HTMLButtonElement>('#reboot-btn')!;
 const publishStatus = document.querySelector<HTMLSpanElement>('#publish-status')!;
+const publishLog = document.querySelector<HTMLPreElement>('#publish-log')!;
+const linkPanel = document.querySelector<HTMLElement>('#link-panel')!;
+const ghUserInput = document.querySelector<HTMLInputElement>('#gh-user')!;
+const ghRepoInput = document.querySelector<HTMLInputElement>('#gh-repo')!;
+const ghLoginBtn = document.querySelector<HTMLButtonElement>('#gh-login-btn')!;
+const ghNewBtn = document.querySelector<HTMLButtonElement>('#gh-new-btn')!;
+const saveLinkBtn = document.querySelector<HTMLButtonElement>('#save-link-btn')!;
+const requiredControlCapability = 'link-git';
 
 function buildHudText(): string {
   const mode = MODES[state.modeIndex];
@@ -171,7 +197,16 @@ async function createStartupPage(): Promise<void> {
 }
 
 async function publishQr(): Promise<void> {
+  if (state.publishStatus === 'RUNNING') {
+    publishLog.textContent = 'Publish is already running. Please wait...';
+    await render();
+    return;
+  }
+
   state.publishStatus = 'RUNNING';
+  publishBtn.disabled = true;
+  rebootBtn.disabled = true;
+  publishLog.textContent = 'Publishing...';
   await render();
 
   try {
@@ -180,18 +215,188 @@ async function publishQr(): Promise<void> {
       headers: { 'Content-Type': 'application/json' },
     });
 
+    const body = (await response.json().catch(() => null)) as { error?: string; logs?: string } | null;
+
+    if (!response.ok) {
+      if (response.status === 409) {
+        state.publishStatus = 'RUNNING';
+        publishLog.textContent = 'Publish already running. Please wait for it to complete.';
+        await render();
+        return;
+      }
+      throw new Error(body?.error ?? `HTTP ${response.status}`);
+    }
+
+    state.publishStatus = 'DONE';
+    publishLog.textContent = body?.logs ?? 'Publish complete.';
+  } catch (error) {
+    console.error('Publish failed:', error);
+    state.publishStatus = 'FAILED';
+    const errorText = String(error);
+    if (errorText.includes('Placeholder git config detected')) {
+      state.linkOpen = true;
+      linkPanel.classList.remove('hidden');
+      publishLog.textContent =
+        'Git config is still placeholder. Open Link Git/Repo, enter GitHub user + repo, then click Save Link, then Publish.';
+    } else {
+      publishLog.textContent = errorText;
+    }
+  }
+
+  publishBtn.disabled = false;
+  rebootBtn.disabled = false;
+  await render();
+}
+
+async function rebootApp(): Promise<void> {
+  if (state.publishStatus === 'RUNNING') {
+    publishLog.textContent = 'Publish in progress. Wait for publish to finish before rebooting.';
+    await render();
+    return;
+  }
+
+  state.publishStatus = 'REBOOTING';
+  publishBtn.disabled = true;
+  rebootBtn.disabled = true;
+  publishLog.textContent = 'Reboot requested. Services will restart now...';
+  await render();
+
+  try {
+    const response = await fetch('http://127.0.0.1:8787/reboot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const body = (await response.json().catch(() => null)) as { error?: string; logs?: string } | null;
+    if (!response.ok) {
+      throw new Error(body?.error ?? `HTTP ${response.status}`);
+    }
+
+    publishLog.textContent = 'Reboot in progress... waiting for services, then reloading page.';
+    await render();
+
+    const deadline = Date.now() + 45000;
+    let appReady = false;
+    let controlReady = false;
+
+    while (Date.now() < deadline) {
+      try {
+        const [appPing, controlPing] = await Promise.all([
+          fetch('http://127.0.0.1:5173', { cache: 'no-store' }),
+          fetch('http://127.0.0.1:8787/health', { cache: 'no-store' }),
+        ]);
+        appReady = appPing.ok;
+        controlReady = controlPing.ok;
+      } catch {
+        appReady = false;
+        controlReady = false;
+      }
+
+      if (appReady && controlReady) {
+        window.location.reload();
+        return;
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+    }
+
+    throw new Error('Reboot timeout: services did not become ready within 45s.');
+  } catch (error) {
+    state.publishStatus = 'FAILED';
+    publishLog.textContent = `Reboot failed: ${String(error)}`;
+    publishBtn.disabled = false;
+    rebootBtn.disabled = false;
+    await render();
+  }
+}
+
+async function linkGitRepo(): Promise<void> {
+  state.linkOpen = !state.linkOpen;
+  linkPanel.classList.toggle('hidden', !state.linkOpen);
+
+  if (!state.linkOpen) {
+    publishLog.textContent = 'Link panel closed.';
+    await render();
+    return;
+  }
+
+  publishLog.textContent = 'Loading current Git config...';
+  try {
+    const response = await fetch('http://127.0.0.1:8787/config', { cache: 'no-store' });
+    const body = (await response.json().catch(() => null)) as {
+      error?: string;
+      config?: {
+        git?: { userName?: string; userEmail?: string; remoteUrl?: string };
+      };
+    } | null;
+    if (!response.ok) {
+      throw new Error(body?.error ?? `HTTP ${response.status}`);
+    }
+
+    const git = body?.config?.git ?? {};
+    const remote = String(git.remoteUrl ?? '');
+    const match = remote.match(/github\.com[/:]([^/]+)\/([^/.]+)(\.git)?$/i);
+
+    ghUserInput.value = match?.[1] ?? '';
+    ghRepoInput.value = match?.[2] ?? '';
+
+    publishLog.textContent = 'Edit fields, then click Save Link.';
+  } catch (error) {
+    publishLog.textContent = `Load config failed: ${String(error)}`;
+  }
+}
+
+async function openGithub(mode: 'login' | 'new'): Promise<void> {
+  try {
+    const response = await fetch('http://127.0.0.1:8787/open-github', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
       throw new Error(body?.error ?? `HTTP ${response.status}`);
     }
 
-    state.publishStatus = 'DONE';
+    publishLog.textContent =
+      'GitHub page opened. This does NOT update app.config.json. Fill fields here and click Save Link.';
   } catch (error) {
-    console.error('Publish failed:', error);
-    state.publishStatus = 'FAILED';
+    publishLog.textContent = `Open GitHub failed: ${String(error)}`;
+  }
+}
+
+async function saveGitLink(): Promise<void> {
+  const githubUser = ghUserInput.value.trim();
+  const repoName = ghRepoInput.value.trim();
+
+  if (!githubUser || !repoName) {
+    publishLog.textContent = 'GitHub user and repo are required.';
+    return;
   }
 
-  await render();
+  saveLinkBtn.disabled = true;
+  publishLog.textContent = 'Saving git link and local remote config...';
+  try {
+    const response = await fetch('http://127.0.0.1:8787/config/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        githubUser,
+        repoName,
+        branch: 'main',
+      }),
+    });
+    const body = (await response.json().catch(() => null)) as { error?: string; remoteUrl?: string; publishUrl?: string } | null;
+    if (!response.ok) {
+      throw new Error(body?.error ?? `HTTP ${response.status}`);
+    }
+
+    publishLog.textContent = `Linked: ${body?.remoteUrl}\nPublish URL: ${body?.publishUrl}\nNow click Publish.`;
+  } catch (error) {
+    publishLog.textContent = `Save link failed: ${String(error)}`;
+  } finally {
+    saveLinkBtn.disabled = false;
+  }
 }
 
 function setKeyboardFallback(): void {
@@ -222,6 +427,34 @@ async function init(): Promise<void> {
   publishBtn.addEventListener('click', () => {
     void publishQr();
   });
+  linkBtn.addEventListener('click', () => {
+    void linkGitRepo();
+  });
+  ghLoginBtn.addEventListener('click', () => {
+    void openGithub('login');
+  });
+  ghNewBtn.addEventListener('click', () => {
+    void openGithub('new');
+  });
+  saveLinkBtn.addEventListener('click', () => {
+    void saveGitLink();
+  });
+  rebootBtn.addEventListener('click', () => {
+    void rebootApp();
+  });
+
+  try {
+    const health = await fetch('http://127.0.0.1:8787/health', { cache: 'no-store' });
+    const info = (await health.json().catch(() => null)) as { capabilities?: string[]; version?: string } | null;
+    if (!health.ok || !info?.capabilities?.includes(requiredControlCapability)) {
+      publishLog.textContent =
+        'Control server is outdated. Run Run-Even-Sim.cmd to refresh local services.';
+    } else {
+      publishLog.textContent = `Control server ready (${info.version ?? 'unknown'})`;
+    }
+  } catch {
+    publishLog.textContent = 'Control server not reachable. Run Run-Even-Sim.cmd.';
+  }
 
   try {
     bridge = await Promise.race([

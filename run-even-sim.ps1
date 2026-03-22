@@ -59,6 +59,25 @@ function Wait-ForUrl {
   return $false
 }
 
+function Stop-ListenersOnPort {
+  param([int]$Port)
+
+  $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  if (-not $listeners) {
+    return
+  }
+
+  $listenerPids = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
+  foreach ($procId in $listenerPids) {
+    if ($procId -and $procId -gt 0) {
+      try {
+        Write-Info "Stopping existing listener PID $procId on port $Port"
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+      } catch {}
+    }
+  }
+}
+
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
@@ -73,6 +92,9 @@ if (-not $npmCmd) {
 
 $uiUrl = "http://${HostIp}:${Port}"
 $controlUrl = "http://${HostIp}:${ControlPort}/health"
+
+Stop-ListenersOnPort -Port $Port
+Stop-ListenersOnPort -Port $ControlPort
 
 Write-Info "Starting local control service on port $ControlPort"
 $controlProcess = Start-Process `
@@ -94,6 +116,14 @@ if (-not (Wait-ForUrl -Url $uiUrl -TimeoutSec $StartupTimeoutSec)) {
 
 if (-not (Wait-ForUrl -Url $controlUrl -TimeoutSec $StartupTimeoutSec)) {
   throw "Control service did not become ready at $controlUrl within $StartupTimeoutSec seconds."
+}
+
+if (-not (Get-Process -Id $devProcess.Id -ErrorAction SilentlyContinue)) {
+  throw "Dev server process exited unexpectedly."
+}
+
+if (-not (Get-Process -Id $controlProcess.Id -ErrorAction SilentlyContinue)) {
+  throw "Control service process exited unexpectedly."
 }
 
 Write-Info "Opening app URL in browser: $uiUrl"

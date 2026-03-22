@@ -21,6 +21,13 @@ Minimal template for Even Hub simulator-first development.
    - performs git add/commit/push
    - triggers `publish-qr.ps1`
    - generates `publish-qr.png` and opens `publish-qr.html`
+4. Click **Link Git/Repo** to run a guided wizard:
+   - pre-fills git name/email when possible
+   - asks GitHub username + repo name
+   - opens GitHub sign-in/create-repo pages
+   - writes git/publish URLs to `app.config.json`
+   - updates local git origin remote
+5. Click **Reboot App** any time to restart local app services (`5173` + `8787`) and relaunch the runner.
 
 ## Important
 

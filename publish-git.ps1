@@ -212,6 +212,10 @@ if (-not $userName -or -not $userEmail -or -not $remoteUrl) {
   throw "git userName/userEmail/remoteUrl are required."
 }
 
+if ($remoteUrl -like "*github.com/your-user/your-repo.git*") {
+  throw "Placeholder repo URL detected. Open Link Git/Repo and set your real GitHub user/repo."
+}
+
 if ($gitConfig.userName -ne $userName -or $gitConfig.userEmail -ne $userEmail -or $gitConfig.remoteUrl -ne $remoteUrl) {
   $config.git.userName = $userName
   $config.git.userEmail = $userEmail
