@@ -3,12 +3,16 @@
   "publishUrl": "https://jacksonpaulhansen.github.io/EvenRealitiesG2_BaseSimpleApp/",
   "git": {
     "enabled": true,
-    "userName": "Your Name",
-    "userEmail": "you@example.com",
+    "userName": "jhansenIPAutomation",
+    "userEmail": "128513998+jhansenIPAutomation@users.noreply.github.com",
     "users": [
       {
         "name": "Your Name",
         "email": "you@example.com"
+      },
+      {
+        "name": "jhansenIPAutomation",
+        "email": "128513998+jhansenIPAutomation@users.noreply.github.com"
       }
     ],
     "repos": [
