@@ -1,0 +1,21 @@
+{
+  "name": "evenr-testdevlabs",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "control": "node scripts/control-server.mjs",
+    "qr": "node scripts/generate-qr.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1"
+  },
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.7",
+    "qrcode": "^1.5.4"
+  }
+}

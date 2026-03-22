@@ -1,0 +1,22 @@
+{
+    "appName":  "Even G2 Base App",
+    "publishUrl":  "https://your-user.github.io/your-repo/",
+    "git":  {
+                "enabled":  true,
+                "userName":  "Your Name",
+                "userEmail":  "you@example.com",
+                "users":  [
+                              {
+                                  "name":  "Your Name",
+                                  "email":  "you@example.com"
+                              }
+                          ],
+                "repos":  [
+                              "https://github.com/your-user/your-repo.git"
+                          ],
+                "remoteUrl":  "https://github.com/your-user/your-repo.git",
+                "branch":  "main",
+                "commitMessagePrefix":  "publish",
+                "autoSetGithubPagesUrl":  true
+            }
+}
