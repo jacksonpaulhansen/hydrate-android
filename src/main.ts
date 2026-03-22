@@ -57,6 +57,7 @@ app.innerHTML = `
       <div class="link-actions">
         <button id="gh-login-btn" type="button">Open GitHub Login</button>
         <button id="gh-new-btn" type="button">Open Create Repo</button>
+        <button id="switch-account-btn" type="button">Switch Git Account</button>
         <button id="save-link-btn" type="button">Save Link</button>
       </div>
     </section>
@@ -76,6 +77,7 @@ const ghUserInput = document.querySelector<HTMLInputElement>('#gh-user')!;
 const ghRepoInput = document.querySelector<HTMLInputElement>('#gh-repo')!;
 const ghLoginBtn = document.querySelector<HTMLButtonElement>('#gh-login-btn')!;
 const ghNewBtn = document.querySelector<HTMLButtonElement>('#gh-new-btn')!;
+const switchAccountBtn = document.querySelector<HTMLButtonElement>('#switch-account-btn')!;
 const saveLinkBtn = document.querySelector<HTMLButtonElement>('#save-link-btn')!;
 const requiredControlCapability = 'link-git';
 
@@ -399,6 +401,24 @@ async function saveGitLink(): Promise<void> {
   }
 }
 
+async function switchGitAccount(): Promise<void> {
+  publishLog.textContent = 'Opening Git account switch flow...';
+  try {
+    const response = await fetch('http://127.0.0.1:8787/switch-git-account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const body = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
+    if (!response.ok) {
+      throw new Error(body?.error ?? `HTTP ${response.status}`);
+    }
+    publishLog.textContent =
+      'Git account switch launched. Sign in with the repo owner account, then try Publish again.';
+  } catch (error) {
+    publishLog.textContent = `Switch Git Account failed: ${String(error)}`;
+  }
+}
+
 function setKeyboardFallback(): void {
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -435,6 +455,9 @@ async function init(): Promise<void> {
   });
   ghNewBtn.addEventListener('click', () => {
     void openGithub('new');
+  });
+  switchAccountBtn.addEventListener('click', () => {
+    void switchGitAccount();
   });
   saveLinkBtn.addEventListener('click', () => {
     void saveGitLink();

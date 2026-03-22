@@ -143,6 +143,21 @@ function triggerLinkGit() {
   child.unref();
 }
 
+function triggerSwitchGitAccount() {
+  const scriptPath = path.join(projectRoot, 'switch-git-account.ps1');
+  const child = spawn(
+    'cmd',
+    ['/c', 'start', '""', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', scriptPath],
+    {
+      cwd: projectRoot,
+      windowsHide: false,
+      detached: true,
+      stdio: 'ignore',
+    },
+  );
+  child.unref();
+}
+
 function openUrl(url) {
   const child = spawn('cmd', ['/c', 'start', '""', url], {
     cwd: projectRoot,
@@ -169,7 +184,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'control-server',
       version: apiVersion,
-      capabilities: ['publish', 'reboot', 'link-git'],
+      capabilities: ['publish', 'reboot', 'link-git', 'switch-git-account'],
     });
     return;
   }
@@ -258,6 +273,16 @@ const server = http.createServer(async (req, res) => {
     try {
       triggerLinkGit();
       sendJson(res, 200, { ok: true, message: 'Git/Repo setup wizard opened in a new terminal window.' });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: String(error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/switch-git-account') {
+    try {
+      triggerSwitchGitAccount();
+      sendJson(res, 200, { ok: true, message: 'Opened Git account switch flow.' });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: String(error) });
     }
