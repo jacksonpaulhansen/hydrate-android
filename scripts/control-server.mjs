@@ -318,9 +318,22 @@ const server = http.createServer(async (req, res) => {
         const payload = body ? JSON.parse(body) : {};
         let userName = String(payload.userName ?? '').trim();
         let userEmail = String(payload.userEmail ?? '').trim();
-        const githubUser = String(payload.githubUser ?? '').trim();
-        const repoName = String(payload.repoName ?? '').trim();
+        let githubUser = String(payload.githubUser ?? '').trim();
+        let repoName = String(payload.repoName ?? '').trim();
         const branch = String(payload.branch ?? 'master').trim() || 'master';
+
+        if (repoName.endsWith('.git')) {
+          repoName = repoName.slice(0, -4);
+        }
+
+        // Accept either "repo" or "owner/repo" in repoName.
+        if (repoName.includes('/')) {
+          const parts = repoName.split('/').filter(Boolean);
+          if (parts.length >= 2) {
+            githubUser = parts[0];
+            repoName = parts[1];
+          }
+        }
 
         if (!githubUser || !repoName) {
           sendJson(res, 400, { ok: false, error: 'githubUser and repoName are required' });

@@ -54,7 +54,7 @@ app.innerHTML = `
     <section id="link-panel" class="link-panel hidden">
       <div class="link-grid">
         <input id="gh-user" placeholder="GitHub user" />
-        <input id="gh-repo" placeholder="Repo name" />
+        <input id="gh-repo" placeholder="Repo name (or owner/repo)" />
       </div>
       <div class="link-actions">
         <button id="gh-login-btn" type="button">Open GitHub Login</button>

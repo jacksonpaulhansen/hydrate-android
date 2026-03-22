@@ -1,6 +1,6 @@
 {
   "appName": "Even G2 Base App",
-  "publishUrl": "https://jacksonpaulhansen.github.io/jacksonpaulhansen/EvenRealitiesG2_BaseSimpleApp/",
+  "publishUrl": "https://jacksonpaulhansen.github.io/EvenRealitiesG2_BaseSimpleApp/",
   "git": {
     "enabled": true,
     "userName": "jhansenIPAutomation",
@@ -21,7 +21,7 @@
       "https://github.com/jacksonpaulhansen/EvenRealitiesG2_BaseSimpleAppNew.git",
       "https://github.com/jacksonpaulhansen/jacksonpaulhansen/EvenRealitiesG2_BaseSimpleApp.git"
     ],
-    "remoteUrl": "https://github.com/jacksonpaulhansen/jacksonpaulhansen/EvenRealitiesG2_BaseSimpleApp.git",
+    "remoteUrl": "https://github.com/jacksonpaulhansen/EvenRealitiesG2_BaseSimpleApp.git",
     "branch": "master",
     "commitMessagePrefix": "publish",
     "autoSetGithubPagesUrl": true
