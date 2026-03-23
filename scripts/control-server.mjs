@@ -223,6 +223,25 @@ function openUrl(url) {
   child.unref();
 }
 
+async function waitForPublishedUrl(url, timeoutMs = 90000, intervalMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const probeUrl = `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`;
+      const response = await fetch(probeUrl, {
+        method: 'GET',
+        redirect: 'follow',
+        cache: 'no-store',
+      });
+      if (response.ok) {
+        return true;
+      }
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
 async function generateQrForUrl(publishUrl) {
   await new Promise((resolve, reject) => {
     const node = spawn('node', ['scripts/generate-qr.mjs', publishUrl], {
@@ -420,6 +439,13 @@ async function runPublishApp(appName, patInput) {
   writeConfig(finalConfig);
 
   await generateQrForUrl(publishUrl);
+  logs.push('Waiting for published site to become available...');
+  const siteReady = await waitForPublishedUrl(publishUrl, 90000, 3000);
+  if (siteReady) {
+    logs.push('Published site is live.');
+  } else {
+    logs.push('Publish URL still propagating; opening anyway.');
+  }
   openUrl(publishUrl);
 
   return {

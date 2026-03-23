@@ -19,7 +19,7 @@ type AppState = {
   deployed: boolean;
 };
 
-const MODES = ['HELLO G2', 'READY', 'SIMULATOR'];
+const MODES = ['Hello', 'World', 'G2 is Ready'];
 const CONTAINER_ID = 1;
 const CONTAINER_NAME = 'mainText';
 const CONTROL_URL = 'http://127.0.0.1:8787';
