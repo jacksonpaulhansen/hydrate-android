@@ -1,16 +1,16 @@
 {
   "github": {
     "owner": "jacksonpaulhansen",
-    "repo": "evenbreak-ality_pomodoroapp",
+    "repo": "even_break-ality_pomodoroapp",
     "pat": ""
   },
-  "appName": "EvenBreak-ality_PomodoroApp",
-  "publishUrl": "https://jacksonpaulhansen.github.io/evenbreak-ality_pomodoroapp/",
+  "appName": "even_break-ality_pomodoroapp",
+  "publishUrl": "https://jacksonpaulhansen.github.io/even_break-ality_pomodoroapp/",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
     "userEmail": "270181675+jacksonpaulhansen@users.noreply.github.com",
-    "remoteUrl": "https://github.com/jacksonpaulhansen/evenbreak-ality_pomodoroapp.git",
+    "remoteUrl": "https://github.com/jacksonpaulhansen/even_break-ality_pomodoroapp.git",
     "branch": "main",
     "commitMessagePrefix": "publish",
     "autoSetGithubPagesUrl": true,
@@ -21,7 +21,7 @@
       }
     ],
     "repos": [
-      "https://github.com/jacksonpaulhansen/evenbreak-ality_pomodoroapp.git"
+      "https://github.com/jacksonpaulhansen/even_break-ality_pomodoroapp.git"
     ],
     "deployed": false
   }

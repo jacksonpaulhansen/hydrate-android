@@ -493,29 +493,67 @@ async function runPublishApp(appName, patInput) {
   await runGitWithPat(['push', '-u', remoteUrl, `HEAD:${branch}`], owner, repo, token);
   logs.push(`Pushed to origin/${branch}`);
 
-  // Enable Pages with workflow build type.
-  const pagesPut = await githubApi({
-    token,
-    method: 'PUT',
-    pathName: `/repos/${owner}/${repo}/pages`,
-    body: { build_type: 'workflow' },
-  });
+  async function enablePagesOnce() {
+    const putRes = await githubApi({
+      token,
+      method: 'PUT',
+      pathName: `/repos/${owner}/${repo}/pages`,
+      body: { build_type: 'workflow' },
+    });
+    if (putRes.response.ok) {
+      return { ok: true, via: 'PUT', status: putRes.response.status, text: putRes.text };
+    }
 
-  if (!pagesPut.response.ok) {
-    const pagesPost = await githubApi({
+    const postRes = await githubApi({
       token,
       method: 'POST',
       pathName: `/repos/${owner}/${repo}/pages`,
       body: { build_type: 'workflow' },
     });
-    if (!pagesPost.response.ok && pagesPost.response.status !== 409) {
-      logs.push(`Pages enable warning: ${pagesPost.text || pagesPost.response.status}`);
-    } else {
-      logs.push('GitHub Pages enabled');
+    if (postRes.response.ok || postRes.response.status === 409) {
+      return { ok: true, via: 'POST', status: postRes.response.status, text: postRes.text };
     }
-  } else {
-    logs.push('GitHub Pages enabled');
+
+    return {
+      ok: false,
+      via: 'POST',
+      status: postRes.response.status,
+      text: postRes.text || putRes.text,
+      putStatus: putRes.response.status,
+      putText: putRes.text,
+    };
   }
+
+  // Enable Pages with workflow build type.
+  let pagesEnable = await enablePagesOnce();
+  if (!pagesEnable.ok) {
+    const pagesLooksBlockedByPrivate =
+      pagesEnable.status === 404 ||
+      pagesEnable.status === 403 ||
+      String(pagesEnable.text || '').toLowerCase().includes('not found');
+
+    if (pagesLooksBlockedByPrivate) {
+      logs.push('Pages enable blocked on current repo visibility. Switching repo to public and retrying...');
+      const makePublic = await githubApi({
+        token,
+        method: 'PATCH',
+        pathName: `/repos/${owner}/${repo}`,
+        body: { private: false },
+      });
+      if (!makePublic.response.ok) {
+        throw new Error(
+          `GitHub Pages enable failed and repo visibility fallback failed: ${makePublic.text || makePublic.response.status}`,
+        );
+      }
+      logs.push('Repo visibility set to public.');
+      pagesEnable = await enablePagesOnce();
+    }
+  }
+
+  if (!pagesEnable.ok) {
+    throw new Error(`Unable to enable GitHub Pages automatically: ${pagesEnable.text || pagesEnable.status}`);
+  }
+  logs.push('GitHub Pages enabled');
 
   // Trigger deploy workflow
   const workflowDispatch = await githubApi({
