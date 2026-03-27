@@ -38,6 +38,27 @@ function Resolve-SimulatorPath {
   return $null
 }
 
+function Start-NpmSimulator {
+  param(
+    [string]$ProjectRoot,
+    [string]$TargetUrl
+  )
+
+  $localSimCmd = Join-Path $ProjectRoot "node_modules\.bin\evenhub-simulator.cmd"
+  if (-not (Test-Path $localSimCmd)) {
+    return $false
+  }
+
+  Write-Info "Launching npm simulator: $localSimCmd $TargetUrl"
+  $simCmdLine = "set RUST_LOG=error && `"$localSimCmd`" `"$TargetUrl`""
+  Start-Process `
+    -FilePath "cmd.exe" `
+    -ArgumentList @("/c", $simCmdLine) `
+    -WorkingDirectory $ProjectRoot | Out-Null
+
+  return $true
+}
+
 function Wait-ForUrl {
   param(
     [string]$Url,
@@ -129,13 +150,20 @@ if (-not (Get-Process -Id $controlProcess.Id -ErrorAction SilentlyContinue)) {
 Write-Info "Opening app URL in browser: $uiUrl"
 Start-Process $uiUrl | Out-Null
 
-$simPath = Resolve-SimulatorPath -ManualPath $SimulatorPath
-if ($simPath) {
-  Write-Info "Launching simulator: $simPath"
-  Start-Process -FilePath $simPath | Out-Null
-} else {
-  Write-Warning "Even Hub simulator executable not found automatically."
-  Write-Host "Open Even Hub manually, then load URL: $uiUrl"
+$simStarted = Start-NpmSimulator -ProjectRoot $projectRoot -TargetUrl $uiUrl
+if (-not $simStarted) {
+  $simPath = Resolve-SimulatorPath -ManualPath $SimulatorPath
+  if ($simPath) {
+    Write-Info "Launching simulator executable: $simPath"
+    Start-Process -FilePath $simPath -ArgumentList @($uiUrl) | Out-Null
+    $simStarted = $true
+  }
+}
+
+if (-not $simStarted) {
+  Write-Warning "Even Hub simulator was not found (npm package or executable)."
+  Write-Host "Install with: npm install -D @evenrealities/evenhub-simulator"
+  Write-Host "Then rerun this script."
 }
 
 Write-Info "Ready. Use Publish button in the app to generate/open QR."

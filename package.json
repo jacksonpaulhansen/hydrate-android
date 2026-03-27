@@ -11,6 +11,8 @@
     "qr": "node scripts/generate-qr.mjs"
   },
   "devDependencies": {
+    "@evenrealities/evenhub-cli": "^0.1.11",
+    "@evenrealities/evenhub-simulator": "^0.5.3",
     "typescript": "~5.9.3",
     "vite": "^8.0.1"
   },

@@ -1,17 +1,17 @@
 {
-  "appName": "even-g2-base-app",
-  "publishUrl": "https://jacksonpaulhansen.github.io/even-g2-base-app/",
   "github": {
     "owner": "jacksonpaulhansen",
-    "repo": "even-g2-base-app",
+    "repo": "even-breaks-pomodoro",
     "pat": ""
   },
+  "appName": "even-breaks-pomodoro",
+  "publishUrl": "https://jacksonpaulhansen.github.io/even-breaks-pomodoro/",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
     "userEmail": "270181675+jacksonpaulhansen@users.noreply.github.com",
-    "remoteUrl": "https://github.com/jacksonpaulhansen/even-g2-base-app.git",
-    "branch": "main",
+    "remoteUrl": "https://github.com/jacksonpaulhansen/even-breaks-pomodoro.git",
+    "branch": "master",
     "commitMessagePrefix": "publish",
     "autoSetGithubPagesUrl": true,
     "users": [
@@ -21,7 +21,7 @@
       }
     ],
     "repos": [
-      "https://github.com/jacksonpaulhansen/even-g2-base-app.git"
+      "https://github.com/jacksonpaulhansen/even-breaks-pomodoro.git"
     ],
     "deployed": false
   }

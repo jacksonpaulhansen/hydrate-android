@@ -11,6 +11,7 @@ const apiVersion = '2026-03-22-publish-app-1';
 
 let publishRunning = false;
 let publishStartedAt = 0;
+let ehpkRunning = false;
 let lastPublish = {
   ok: null,
   error: '',
@@ -223,6 +224,102 @@ function openUrl(url) {
   child.unref();
 }
 
+function openPath(targetPath) {
+  const child = spawn('cmd', ['/c', 'start', '""', targetPath], {
+    cwd: projectRoot,
+    windowsHide: true,
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: projectRoot,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...options,
+    });
+
+    let output = '';
+    child.stdout.on('data', (chunk) => {
+      output += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      output += String(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(output);
+      } else {
+        reject(new Error(output || `${command} ${args.join(' ')} failed with code ${code}`));
+      }
+    });
+  });
+}
+
+async function runEhpkBuild(appNameRaw) {
+  const logs = [];
+  const appName = String(appNameRaw || '').trim() || 'even-g2-app';
+  const safeName = sanitizeRepoName(appName);
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const appJsonPath = path.join(projectRoot, 'app.json');
+  const distPath = path.join(projectRoot, 'dist');
+  const outputDir = path.join(projectRoot, 'ehpk');
+  const outputFile = `${safeName}.ehpk`;
+  const outputPath = path.join(outputDir, outputFile);
+
+  logs.push('Building web app (dist)...');
+  await runCommand(npmCmd, ['run', 'build']);
+
+  if (!fs.existsSync(appJsonPath)) {
+    logs.push('app.json not found. Creating with evenhub init...');
+    await runCommand(npxCmd, ['@evenrealities/evenhub-cli', 'init', '--output', 'app.json']);
+  }
+
+  if (!fs.existsSync(distPath)) {
+    throw new Error('dist folder missing after build. Cannot pack .ehpk.');
+  }
+
+  const appJson = JSON.parse(fs.readFileSync(appJsonPath, 'utf8'));
+  appJson.name = appName;
+  appJson.entrypoint = 'index.html';
+  appJson.version = String(appJson.version || '0.1.0');
+  if (!appJson.package_id || String(appJson.package_id).includes('example')) {
+    appJson.package_id = `com.${safeName.replace(/[^a-z0-9.]/g, '') || 'eveng2app'}`;
+  }
+  fs.writeFileSync(appJsonPath, `${JSON.stringify(appJson, null, 2)}\n`, 'utf8');
+
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  logs.push(`Packing .ehpk (${outputFile})...`);
+  await runCommand(npxCmd, [
+    '@evenrealities/evenhub-cli',
+    'pack',
+    'app.json',
+    'dist',
+    '--output',
+    outputPath,
+  ]);
+
+  logs.push(`Created package: ${outputPath}`);
+  openPath(outputDir);
+
+  return {
+    logs: logs.join('\n'),
+    outputPath,
+    outputFile,
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function waitForPublishedUrl(url, timeoutMs = 90000, intervalMs = 3000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -315,7 +412,8 @@ async function runPublishApp(appName, patInput) {
     },
   });
 
-  if (createRepoResult.response.status === 201) {
+  const repoCreated = createRepoResult.response.status === 201;
+  if (repoCreated) {
     logs.push(`Created repo: ${owner}/${repo}`);
   } else if (createRepoResult.response.status === 422) {
     logs.push(`Repo already exists: ${owner}/${repo}`);
@@ -323,7 +421,7 @@ async function runPublishApp(appName, patInput) {
     throw new Error(`GitHub repo create failed: ${createRepoResult.text || createRepoResult.response.status}`);
   }
 
-  const branch = 'main';
+  const branch = 'master';
   const userName = owner;
   const ghId = String(userResult.json?.id ?? '').trim();
   const userEmail = ghId
@@ -439,6 +537,10 @@ async function runPublishApp(appName, patInput) {
   writeConfig(finalConfig);
 
   await generateQrForUrl(publishUrl);
+  if (repoCreated) {
+    logs.push('First publish detected. Waiting 35s before opening site...');
+    await sleep(35000);
+  }
   logs.push('Waiting for published site to become available...');
   const siteReady = await waitForPublishedUrl(publishUrl, 90000, 3000);
   if (siteReady) {
@@ -473,7 +575,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'control-server',
       version: apiVersion,
-      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account'],
+      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk'],
     });
     return;
   }
@@ -604,6 +706,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/build-ehpk') {
+    if (ehpkRunning) {
+      sendJson(res, 409, { ok: false, error: 'EHPK build already running' });
+      return;
+    }
+
+    let body = '';
+    req.on('data', (chunk) => {
+      body += String(chunk);
+    });
+    req.on('end', async () => {
+      ehpkRunning = true;
+      try {
+        const payload = body ? JSON.parse(body) : {};
+        const appName = String(payload.appName ?? '').trim() || 'even-g2-app';
+        const result = await runEhpkBuild(appName);
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: String(error) });
+      } finally {
+        ehpkRunning = false;
+      }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/reboot') {
     if (publishRunning) {
       sendJson(res, 409, { ok: false, error: 'Cannot reboot while publish is running' });
@@ -660,7 +788,7 @@ const server = http.createServer(async (req, res) => {
         let userEmail = String(payload.userEmail ?? '').trim();
         let githubUser = String(payload.githubUser ?? '').trim();
         let repoName = String(payload.repoName ?? '').trim();
-        const branch = String(payload.branch ?? 'main').trim() || 'main';
+        const branch = String(payload.branch ?? 'master').trim() || 'master';
 
         if (repoName.endsWith('.git')) {
           repoName = repoName.slice(0, -4);
