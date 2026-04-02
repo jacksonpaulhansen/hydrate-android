@@ -288,18 +288,11 @@ body {
   font-size: 0.6em;
   opacity: 0.5;
 }
-/* When the main shell is in active-timer mode, collapse unless user expanded */
-.timer-active .collapsible > *:not(legend) {
+.collapsible.collapsed > *:not(legend) {
   display: none;
 }
-.timer-active .collapsible[data-expanded] > *:not(legend) {
-  display: revert;
-}
-.timer-active .collapsible > legend::after {
+.collapsible.collapsed > legend::after {
   content: ' ▼';
-}
-.timer-active .collapsible[data-expanded] > legend::after {
-  content: ' ▲';
 }
 
 /* ── Browser timer display ───────────────────────────────────────────────── */

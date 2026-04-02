@@ -41,8 +41,14 @@ type AppState = {
   taskQueue: Task[];
   todoistToken: string;
   todoistProjectId: string;
-  taskReviewExtendMinutes: number;
+  focusBumpMinutes: number;
+  focusBumpMax: number;     // 0 = unlimited
+  breakBumpMinutes: number;
+  breakBumpMax: number;     // 0 = unlimited
+  bumpCount: number;
   taskReviewPending: boolean;
+  taskReviewSelection: number;
+  taskChangeSelection: number;  // 0=End, 1=Stay, 2=Reset
 };
 
 const MAIN_CONTAINER_ID = 1;
@@ -89,8 +95,14 @@ const state: AppState = {
   taskQueue: [],
   todoistToken: '',
   todoistProjectId: '',
-  taskReviewExtendMinutes: 5,
+  focusBumpMinutes: 3,
+  focusBumpMax: 2,
+  breakBumpMinutes: 1,
+  breakBumpMax: 2,
+  bumpCount: 0,
   taskReviewPending: false,
+  taskReviewSelection: 0,
+  taskChangeSelection: 0,
 };
 
 let bridge: EvenAppBridge | null = null;
@@ -102,6 +114,7 @@ let lastEventSignature = '';
 let lastEventAt = 0;
 let lastEventLabel = '';
 let debugToolsVisible = !HIDE_DEBUG_TOOLS;
+let didAutoCollapse = false;
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app root element');
@@ -129,7 +142,35 @@ app.innerHTML = `
         </div>
       </fieldset>
 
-      <fieldset class="group-box compact-box">
+      <fieldset class="group-box compact-box collapsible collapsed">
+        <legend>Time Bump</legend>
+        <div class="settings-row">
+          <div class="mini-field">
+            <label for="focus-bump-mins">Focus</label>
+            <input id="focus-bump-mins" type="number" min="1" max="60" value="3" />
+            <span class="field-unit">mins</span>
+          </div>
+          <div class="mini-field">
+            <label for="focus-bump-max">Max</label>
+            <input id="focus-bump-max" type="number" min="0" max="20" value="2" />
+            <span class="field-unit">0=∞</span>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="mini-field">
+            <label for="break-bump-mins">Break</label>
+            <input id="break-bump-mins" type="number" min="1" max="60" value="1" />
+            <span class="field-unit">mins</span>
+          </div>
+          <div class="mini-field">
+            <label for="break-bump-max">Max</label>
+            <input id="break-bump-max" type="number" min="0" max="20" value="2" />
+            <span class="field-unit">0=∞</span>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="group-box compact-box collapsible collapsed" id="transition-fieldset">
         <legend>Transition</legend>
         <div class="settings-row">
           <div class="mini-field">
@@ -261,6 +302,10 @@ const ehpkBtn = document.querySelector<HTMLButtonElement>('#ehpk-btn')!;
 const debugToolsFieldset = document.querySelector<HTMLElement>('#debug-tools')!;
 const focusMinutesInput = document.querySelector<HTMLInputElement>('#focus-minutes')!;
 const breakMinutesInput = document.querySelector<HTMLInputElement>('#break-minutes')!;
+const focusBumpMinsInput = document.querySelector<HTMLInputElement>('#focus-bump-mins')!;
+const focusBumpMaxInput  = document.querySelector<HTMLInputElement>('#focus-bump-max')!;
+const breakBumpMinsInput = document.querySelector<HTMLInputElement>('#break-bump-mins')!;
+const breakBumpMaxInput  = document.querySelector<HTMLInputElement>('#break-bump-max')!;
 const transitionModeSelect = document.querySelector<HTMLSelectElement>('#transition-mode')!;
 const transitionSecondsInput = document.querySelector<HTMLInputElement>('#transition-seconds')!;
 const flashAlternateInput = document.querySelector<HTMLInputElement>('#flash-alternate')!;
@@ -275,9 +320,6 @@ const eventLog = document.querySelector<HTMLPreElement>('#event-log')!;
 const publishLog = document.querySelector<HTMLPreElement>('#publish-log')!;
 const eventLines: string[] = [];
 const DISPLAY_COLUMNS = 52;
-const hudMainEl = document.querySelector<HTMLElement>('#hud-main')!;
-const userSettingsFieldset = document.querySelector<HTMLFieldSetElement>('#user-settings-fieldset')!;
-const todoistFieldset = document.querySelector<HTMLFieldSetElement>('#todoist-fieldset')!;
 const browserTimerMode = document.querySelector<HTMLSpanElement>('#browser-timer-mode')!;
 const browserTimerPhase = document.querySelector<HTMLSpanElement>('#browser-timer-phase')!;
 const browserTimerTime = document.querySelector<HTMLDivElement>('#browser-timer-time')!;
@@ -357,6 +399,7 @@ function resetCurrentMode(): void {
 function setMode(mode: PomodoroMode): void {
   state.mode = mode;
   state.running = false;
+  state.bumpCount = 0;
   resetCurrentMode();
 }
 
@@ -395,12 +438,14 @@ function completeTransition(startRunning: boolean): void {
     state.transitionRemainingSeconds = 0;
     state.transitionElapsedMs = 0;
     state.phase = 'TASK_REVIEW';
+    state.taskReviewSelection = 0;
     state.running = false;
     lastTickMs = Date.now();
     return;
   }
 
   state.mode = state.pendingMode;
+  state.bumpCount = 0;
   state.pendingMode = null;
   state.inTransition = false;
   state.transitionRemainingSeconds = 0;
@@ -497,6 +542,14 @@ function renderTaskList(): void {
   currentTaskLabel.textContent = state.currentTask ? `Active: ${state.currentTask.title}` : '';
 }
 
+function initCollapsibles(): void {
+  document.querySelectorAll<HTMLElement>('.collapsible').forEach(el => {
+    const legend = el.querySelector(':scope > legend');
+    if (!legend) return;
+    legend.addEventListener('click', () => el.classList.toggle('collapsed'));
+  });
+}
+
 function loadTasksFromStorage(): void {
   try {
     const raw = localStorage.getItem(LS_MANUAL_TASKS);
@@ -527,20 +580,40 @@ function markTaskDone(): void {
 }
 
 
-function enterTaskReview(): void {
-  if (state.transitionMode === 'AUTO') {
-    // AUTO: mark done, flash, go straight to BREAK — no review prompt
-    markTaskDone();
-    startTransition('BREAK');
+type ReviewAction = 'done' | 'extend' | 'incomplete';
+type ReviewOption = { label: string; action: ReviewAction };
+
+function getTaskReviewOptions(): ReviewOption[] {
+  const bumpMax = state.mode === 'FOCUS' ? state.focusBumpMax : state.breakBumpMax;
+  const extMin  = state.mode === 'FOCUS' ? state.focusBumpMinutes : state.breakBumpMinutes;
+  const canExtend = bumpMax === 0 || state.bumpCount < bumpMax;
+  if (state.mode === 'FOCUS') {
+    return [
+      { label: 'DONE', action: 'done' },
+      ...(canExtend ? [{ label: `+${extMin} MIN`, action: 'extend' as ReviewAction }] : []),
+      { label: 'INCOMPLETE', action: 'incomplete' },
+    ];
   } else {
-    // MANUAL: flash first, then completeTransition intercepts into TASK_REVIEW
-    state.taskReviewPending = true;
-    startTransition('BREAK');
+    return [
+      { label: 'START FOCUS', action: 'done' },
+      ...(canExtend ? [{ label: `+${extMin} BREAK`, action: 'extend' as ReviewAction }] : []),
+    ];
   }
 }
 
-function extendFocusSession(minutes: number): void {
-  state.mode = 'FOCUS';
+function enterTaskReview(): void {
+  const nextMode: PomodoroMode = state.mode === 'FOCUS' ? 'BREAK' : 'FOCUS';
+  if (state.transitionMode === 'AUTO') {
+    if (state.mode === 'FOCUS') markTaskDone();
+    startTransition(nextMode);
+  } else {
+    state.taskReviewPending = true;
+    state.taskReviewSelection = 0;
+    startTransition(nextMode);
+  }
+}
+
+function extendCurrentSession(minutes: number): void {
   state.remainingSeconds = minutes * 60;
   state.phase = 'TIMER';
   state.running = true;
@@ -639,21 +712,24 @@ function buildMainHudText(): string {
   if (state.phase === 'TASK_REVIEW') {
     const taskLine = state.currentTask
       ? truncateTask(state.currentTask.title, DISPLAY_COLUMNS)
-      : '(NO TASK)'.padEnd(DISPLAY_COLUMNS);
-    const extMin = state.taskReviewExtendMinutes;
+      : (state.mode === 'BREAK' ? 'BREAK' : '(NO TASK)').padEnd(DISPLAY_COLUMNS);
+    const opts = getTaskReviewOptions();
+    const sel = Math.min(state.taskReviewSelection, opts.length - 1);
     return [
       taskLine,
-      `UP:DONE`.padEnd(DISPLAY_COLUMNS),
-      `DN:+${extMin} MIN`.padEnd(DISPLAY_COLUMNS),
+      ...opts.map((o, i) => `${i === sel ? '>' : ' '} ${o.label}`.padEnd(DISPLAY_COLUMNS)),
     ].join('\n');
   }
 
   if (state.phase === 'TASK_CHANGE') {
-    const taskLine = state.currentTask
-      ? truncateTask(state.currentTask.title, DISPLAY_COLUMNS)
-      : '(NO TASK)'.padEnd(DISPLAY_COLUMNS);
-    const hint = 'SKIP? CLK=End session  DN=Stay'.padEnd(DISPLAY_COLUMNS);
-    return [taskLine, hint].join('\n');
+    const endLabel = `END ${state.mode}`;
+    const sel = state.taskChangeSelection;
+    return [
+      'SKIP?'.padEnd(DISPLAY_COLUMNS),
+      `${sel === 0 ? '>' : ' '} ${endLabel}`.padEnd(DISPLAY_COLUMNS),
+      `${sel === 1 ? '>' : ' '} STAY`.padEnd(DISPLAY_COLUMNS),
+      `${sel === 2 ? '>' : ' '} RESET TIME`.padEnd(DISPLAY_COLUMNS),
+    ].join('\n');
   }
 
   const timerLine = [
@@ -693,46 +769,68 @@ function updateBrowserTimer(): void {
   browserTimerMode.textContent = state.mode;
   browserTimerTask.textContent = state.currentTask?.title ?? '';
 
-  // Only collapse on play — never auto-expand on pause
-  if (state.running) hudMainEl.classList.add('timer-active');
+  // Auto-collapse all collapsibles once when timer first plays; never re-expand automatically
+  if (state.running && !didAutoCollapse) {
+    didAutoCollapse = true;
+    document.querySelectorAll<HTMLElement>('.collapsible').forEach(el => el.classList.add('collapsed'));
+  }
 
   if (state.phase === 'TASK_REVIEW') {
-    const extMin = state.taskReviewExtendMinutes;
+    const opts = getTaskReviewOptions();
+    const extMin = state.mode === 'FOCUS' ? state.focusBumpMinutes : state.breakBumpMinutes;
+    const isFocus = state.mode === 'FOCUS';
     browserTimerTime.textContent = formatTime(state.remainingSeconds);
-    browserTimerPhase.textContent = 'Done?';
-    btnTimerUp.textContent = '✓ Done';       btnTimerUp.disabled = false;  btnTimerUp.className = 'timer-btn timer-btn-primary';
-    btnTimerClick.textContent = '—';         btnTimerClick.disabled = true; btnTimerClick.className = 'timer-btn';
-    btnTimerDbl.textContent = '—';           btnTimerDbl.disabled = true;  btnTimerDbl.className = 'timer-btn';
-    btnTimerDown.textContent = `+${extMin} min`; btnTimerDown.disabled = false; btnTimerDown.className = 'timer-btn';
+    browserTimerPhase.textContent = 'review';
+
+    const doneIdx = opts.findIndex(o => o.action === 'done');
+    const extIdx  = opts.findIndex(o => o.action === 'extend');
+    const incIdx  = opts.findIndex(o => o.action === 'incomplete');
+
+    btnTimerUp.textContent = isFocus ? '✓ Done' : '▶ Start Focus';
+    btnTimerUp.disabled = doneIdx < 0;
+    btnTimerUp.className = 'timer-btn timer-btn-primary';
+    btnTimerUp.onclick = doneIdx >= 0 ? () => { state.taskReviewSelection = doneIdx; void applyAction('CLICK'); } : null;
+
+    btnTimerDown.textContent = extIdx >= 0 ? (isFocus ? `+${extMin} min` : `+${extMin} break`) : '—';
+    btnTimerDown.disabled = extIdx < 0;
+    btnTimerDown.className = 'timer-btn';
+    btnTimerDown.onclick = extIdx >= 0 ? () => { state.taskReviewSelection = extIdx; void applyAction('CLICK'); } : null;
+
+    btnTimerClick.textContent = incIdx >= 0 ? '⚐ Incomplete' : '—';
+    btnTimerClick.disabled = incIdx < 0;
+    btnTimerClick.className = 'timer-btn';
+    btnTimerClick.onclick = incIdx >= 0 ? () => { state.taskReviewSelection = incIdx; void applyAction('CLICK'); } : null;
+
+    btnTimerDbl.textContent = '—'; btnTimerDbl.disabled = true; btnTimerDbl.className = 'timer-btn';
+    btnTimerDbl.onclick = null;
     return;
   } else if (state.phase === 'TASK_CHANGE') {
+    const endLabel = `End ${state.mode === 'FOCUS' ? 'Focus' : 'Break'}`;
     browserTimerTime.textContent = formatTime(state.remainingSeconds);
     browserTimerPhase.textContent = 'Skip?';
-    btnTimerUp.textContent = '—';          btnTimerUp.disabled = true;
-    btnTimerClick.textContent = 'End Session'; btnTimerClick.disabled = false;
-    btnTimerDbl.textContent = '—';         btnTimerDbl.disabled = true;
-    btnTimerDown.textContent = 'Stay';     btnTimerDown.disabled = false;
+    btnTimerUp.textContent = endLabel;    btnTimerUp.disabled = false;    btnTimerUp.className = 'timer-btn timer-btn-primary';
+    btnTimerUp.onclick = () => { state.taskChangeSelection = 0; void applyAction('CLICK'); };
+    btnTimerClick.textContent = 'Stay';   btnTimerClick.disabled = false; btnTimerClick.className = 'timer-btn';
+    btnTimerClick.onclick = () => { state.taskChangeSelection = 1; void applyAction('CLICK'); };
+    btnTimerDbl.textContent = '—';        btnTimerDbl.disabled = true;    btnTimerDbl.className = 'timer-btn';
+    btnTimerDbl.onclick = null;
+    btnTimerDown.textContent = 'Reset';   btnTimerDown.disabled = false;  btnTimerDown.className = 'timer-btn';
+    btnTimerDown.onclick = () => { state.taskChangeSelection = 2; void applyAction('CLICK'); };
   } else if (state.inTransition) {
-    browserTimerTime.textContent = state.transitionMode === 'AUTO'
-      ? formatTime(state.transitionRemainingSeconds)
-      : '…';
-    const manualReady = state.transitionMode === 'MANUAL'
-      && state.transitionElapsedMs >= Math.floor(state.transitionSeconds * 1000);
-    browserTimerPhase.textContent = manualReady ? 'Click to continue' : 'transitioning';
-    btnTimerUp.textContent = '—';  btnTimerUp.disabled = true;
-    btnTimerClick.textContent = manualReady ? 'Continue →' : '…';
-    btnTimerClick.disabled = !manualReady;
-    btnTimerDbl.textContent = '—'; btnTimerDbl.disabled = true;
-    btnTimerDown.textContent = '—'; btnTimerDown.disabled = true;
+    browserTimerTime.textContent = formatTime(state.transitionRemainingSeconds);
+    browserTimerPhase.textContent = 'transitioning';
+    btnTimerUp.textContent = '—';    btnTimerUp.disabled = true;     btnTimerUp.className = 'timer-btn';    btnTimerUp.onclick = null;
+    btnTimerClick.textContent = '…'; btnTimerClick.disabled = true;  btnTimerClick.className = 'timer-btn'; btnTimerClick.onclick = null;
+    btnTimerDbl.textContent = '—';   btnTimerDbl.disabled = true;    btnTimerDbl.className = 'timer-btn';   btnTimerDbl.onclick = null;
+    btnTimerDown.textContent = '—';  btnTimerDown.disabled = true;   btnTimerDown.className = 'timer-btn';  btnTimerDown.onclick = null;
   } else {
     browserTimerTime.textContent = formatTime(state.remainingSeconds);
     browserTimerPhase.textContent = state.running ? '' : 'paused';
-    btnTimerUp.textContent = '↑ Focus';    btnTimerUp.disabled = false;  btnTimerUp.className = 'timer-btn';
+    btnTimerUp.textContent = '↑ Focus';    btnTimerUp.disabled = false;    btnTimerUp.className = 'timer-btn';    btnTimerUp.onclick = null;
     btnTimerClick.textContent = state.running ? '⏸ Pause' : '▶ Start';
-    btnTimerClick.disabled = false;        btnTimerClick.className = 'timer-btn timer-btn-primary';
-    btnTimerDbl.textContent = state.running ? '⇄ Change' : 'Reset';
-    btnTimerDbl.disabled = false;          btnTimerDbl.className = 'timer-btn';
-    btnTimerDown.textContent = '↓ Break';  btnTimerDown.disabled = false; btnTimerDown.className = 'timer-btn';
+    btnTimerClick.disabled = false;        btnTimerClick.className = 'timer-btn timer-btn-primary'; btnTimerClick.onclick = null;
+    btnTimerDbl.textContent = '⇄ Change';  btnTimerDbl.disabled = false;   btnTimerDbl.className = 'timer-btn';   btnTimerDbl.onclick = null;
+    btnTimerDown.textContent = '↓ Break';  btnTimerDown.disabled = false;   btnTimerDown.className = 'timer-btn';  btnTimerDown.onclick = null;
   }
 }
 
@@ -760,19 +858,12 @@ function tickPomodoro(): void {
   if (state.inTransition) {
     lastTickMs = now;
     state.transitionElapsedMs += deltaMs;
-    if (state.transitionMode === 'AUTO') {
-      const totalMs = Math.max(1, Math.floor(state.transitionSeconds * 1000));
-      const remainingMs = Math.max(0, totalMs - state.transitionElapsedMs);
-      state.transitionRemainingSeconds = remainingMs / 1000;
-
-      if (remainingMs <= 0 && state.pendingMode) {
-        completeTransition(true);
-      }
-    } else {
-      // Manual mode flashes first, then waits for click to continue.
-      state.transitionRemainingSeconds = 0;
+    const totalMs = Math.max(1, Math.floor(state.transitionSeconds * 1000));
+    const remainingMs = Math.max(0, totalMs - state.transitionElapsedMs);
+    state.transitionRemainingSeconds = remainingMs / 1000;
+    if (remainingMs <= 0 && state.pendingMode) {
+      completeTransition(true);
     }
-
     void render();
     return;
   }
@@ -790,11 +881,7 @@ function tickPomodoro(): void {
   state.remainingSeconds -= deltaSeconds;
 
   while (state.remainingSeconds <= 0) {
-    if (state.mode === 'FOCUS') {
-      enterTaskReview();
-    } else {
-      startTransition('FOCUS');
-    }
+    enterTaskReview();
     break;
   }
 
@@ -804,30 +891,71 @@ function tickPomodoro(): void {
 async function applyAction(action: InputAction): Promise<void> {
   // ── TASK_REVIEW: after flash, ask about 5 more mins ─────────────────────
   if (state.phase === 'TASK_REVIEW') {
-    if (action === 'UP' || action === 'CLICK') {
-      // Done — go directly to break, no flash
-      markTaskDone();
-      setMode('BREAK');
-      state.phase = 'TIMER';
+    const opts = getTaskReviewOptions();
+    const maxSel = opts.length - 1;
+    if (action === 'UP') {
+      state.taskReviewSelection = Math.max(0, state.taskReviewSelection - 1);
     } else if (action === 'DOWN') {
-      // +X more minutes — back to focus
-      extendFocusSession(state.taskReviewExtendMinutes);
+      state.taskReviewSelection = Math.min(maxSel, state.taskReviewSelection + 1);
+    } else if (action === 'CLICK') {
+      const chosen = opts[Math.min(state.taskReviewSelection, maxSel)];
+      state.taskReviewSelection = 0;
+      if (chosen.action === 'done') {
+        if (state.mode === 'FOCUS') markTaskDone();
+        const nextMode: PomodoroMode = state.mode === 'FOCUS' ? 'BREAK' : 'FOCUS';
+        setMode(nextMode);
+        if (nextMode === 'FOCUS') { state.currentTask = state.taskQueue[0] ?? null; renderTaskList(); }
+        state.running = true; state.phase = 'TIMER'; lastTickMs = Date.now();
+      } else if (chosen.action === 'extend') {
+        state.bumpCount++;
+        extendCurrentSession(state.mode === 'FOCUS' ? state.focusBumpMinutes : state.breakBumpMinutes);
+      } else {
+        // incomplete — don't mark done, just go to break
+        setMode('BREAK');
+        state.running = true; state.phase = 'TIMER'; lastTickMs = Date.now();
+      }
     }
     await render();
     return;
   }
 
-  // ── TASK_CHANGE: DBL_CLICK mid-session to skip or stay ──────────────────
+  // ── TASK_CHANGE: 3-option cursor menu ───────────────────────────────────
   if (state.phase === 'TASK_CHANGE') {
-    if (action === 'CLICK') {
-      // End session early: skip task, go directly to break, no flash or review
-      markTaskDone();
-      setMode('BREAK');
-    } else if (action === 'DOWN' || action === 'DOUBLE_CLICK') {
-      // Stay: resume timer
-      state.phase = 'TIMER';
-      state.running = true;
-      lastTickMs = Date.now();
+    if (action === 'UP') {
+      state.taskChangeSelection = Math.max(0, state.taskChangeSelection - 1);
+    } else if (action === 'DOWN') {
+      state.taskChangeSelection = Math.min(2, state.taskChangeSelection + 1);
+    } else if (action === 'CLICK') {
+      const sel = state.taskChangeSelection;
+      state.taskChangeSelection = 0;
+      if (sel === 0) {
+        // End current session — no flash, no review, just switch modes
+        if (state.mode === 'FOCUS') {
+          markTaskDone();
+          setMode('BREAK');
+          state.phase = 'TIMER';
+          state.running = true;
+          lastTickMs = Date.now();
+        } else {
+          setMode('FOCUS');
+          state.phase = 'TIMER';
+          state.currentTask = state.taskQueue[0] ?? null;
+          renderTaskList();
+          state.running = true;
+          lastTickMs = Date.now();
+        }
+      } else if (sel === 1) {
+        // Stay — resume
+        state.phase = 'TIMER';
+        state.running = true;
+        lastTickMs = Date.now();
+      } else {
+        // Reset time — reset duration, auto-play
+        state.remainingSeconds = secondsForMode(state.mode);
+        state.phase = 'TIMER';
+        state.running = true;
+        lastTickMs = Date.now();
+      }
     }
     await render();
     return;
@@ -837,14 +965,10 @@ async function applyAction(action: InputAction): Promise<void> {
   if (action === 'CLICK') {
     toggleRunPause();
   } else if (action === 'DOUBLE_CLICK') {
-    if (state.mode === 'FOCUS' && state.running) {
-      // Open change/skip menu
-      state.running = false;
-      state.phase = 'TASK_CHANGE';
-    } else {
-      state.running = false;
-      resetCurrentMode();
-    }
+    // Always enter change page — never reset from here
+    state.running = false;
+    state.phase = 'TASK_CHANGE';
+    state.taskChangeSelection = 0;
   } else if (action === 'UP') {
     setMode('FOCUS');
   } else if (action === 'DOWN') {
@@ -1130,6 +1254,7 @@ function setKeyboardFallback(): void {
 
 async function init(): Promise<void> {
   loadTasksFromStorage();
+  initCollapsibles();
 
   setKeyboardFallback();
   publishBtn.addEventListener('click', () => void publishApp());
@@ -1169,16 +1294,15 @@ async function init(): Promise<void> {
   btnTimerDbl.addEventListener('click',   () => void applyAction('DOUBLE_CLICK'));
   btnTimerDown.addEventListener('click',  () => void applyAction('DOWN'));
 
-  // Collapsible legend toggles
-  for (const fs of [userSettingsFieldset, todoistFieldset]) {
-    fs.querySelector('legend')!.addEventListener('click', () => {
-      fs.toggleAttribute('data-expanded');
-    });
-  }
+
 
   transitionModeSelect.value = state.transitionMode;
   focusMinutesInput.value = String(state.focusMinutes);
   breakMinutesInput.value = String(state.breakMinutes);
+  focusBumpMinsInput.value = String(state.focusBumpMinutes);
+  focusBumpMaxInput.value  = String(state.focusBumpMax);
+  breakBumpMinsInput.value = String(state.breakBumpMinutes);
+  breakBumpMaxInput.value  = String(state.breakBumpMax);
   transitionSecondsInput.value = String(state.transitionSeconds);
   flashAlternateInput.checked = state.flashAlternate;
   flashIntervalMsInput.value = String(state.flashIntervalMs);
@@ -1207,6 +1331,27 @@ async function init(): Promise<void> {
 
   focusMinutesInput.addEventListener('change', onFocusDurationChange);
   breakMinutesInput.addEventListener('change', onBreakDurationChange);
+
+  focusBumpMinsInput.addEventListener('change', () => {
+    state.focusBumpMinutes = clampInt(Number(focusBumpMinsInput.value), 1, 60);
+    focusBumpMinsInput.value = String(state.focusBumpMinutes);
+    void render();
+  });
+  focusBumpMaxInput.addEventListener('change', () => {
+    state.focusBumpMax = clampInt(Number(focusBumpMaxInput.value), 0, 20);
+    focusBumpMaxInput.value = String(state.focusBumpMax);
+    void render();
+  });
+  breakBumpMinsInput.addEventListener('change', () => {
+    state.breakBumpMinutes = clampInt(Number(breakBumpMinsInput.value), 1, 60);
+    breakBumpMinsInput.value = String(state.breakBumpMinutes);
+    void render();
+  });
+  breakBumpMaxInput.addEventListener('change', () => {
+    state.breakBumpMax = clampInt(Number(breakBumpMaxInput.value), 0, 20);
+    breakBumpMaxInput.value = String(state.breakBumpMax);
+    void render();
+  });
 
   transitionModeSelect.addEventListener('change', () => {
     state.transitionMode = transitionModeSelect.value === 'MANUAL' ? 'MANUAL' : 'AUTO';
