@@ -277,3 +277,205 @@ body {
   font-size: 0.68rem;
   white-space: pre-wrap;
 }
+
+/* ── Collapsible fieldsets ───────────────────────────────────────────────── */
+.collapsible > legend {
+  cursor: pointer;
+  user-select: none;
+}
+.collapsible > legend::after {
+  content: ' ▲';
+  font-size: 0.6em;
+  opacity: 0.5;
+}
+/* When the main shell is in active-timer mode, collapse unless user expanded */
+.timer-active .collapsible > *:not(legend) {
+  display: none;
+}
+.timer-active .collapsible[data-expanded] > *:not(legend) {
+  display: revert;
+}
+.timer-active .collapsible > legend::after {
+  content: ' ▼';
+}
+.timer-active .collapsible[data-expanded] > legend::after {
+  content: ' ▲';
+}
+
+/* ── Browser timer display ───────────────────────────────────────────────── */
+.browser-timer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px 10px;
+  margin-bottom: 8px;
+  background: #060e06;
+  border: 1px solid #1e381e;
+  border-radius: 6px;
+}
+
+.browser-timer-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.browser-timer-mode {
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  color: #4a8a4a;
+  text-transform: uppercase;
+}
+
+.browser-timer-phase {
+  font-size: 0.68rem;
+  color: #6a8a6a;
+  min-width: 80px;
+}
+
+.browser-timer-time {
+  font-size: 2.6rem;
+  font-weight: bold;
+  color: #00ff3a;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  font-family: 'Consolas', monospace;
+}
+
+.browser-timer-task {
+  font-size: 0.72rem;
+  color: #8aaa8a;
+  max-width: 280px;
+  text-align: center;
+  min-height: 1em;
+  word-break: break-word;
+}
+
+.browser-timer-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.timer-btn {
+  padding: 5px 10px;
+  border: 1px solid #2a4a2a;
+  background: #0d1a0d;
+  color: #8acc8a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: 'Consolas', monospace;
+  font-size: 0.72rem;
+  transition: background 0.1s, color 0.1s;
+  min-width: 70px;
+}
+
+.timer-btn:hover:not(:disabled) {
+  background: #1a2e1a;
+  color: #00ff3a;
+  border-color: #00ff3a;
+}
+
+.timer-btn:disabled {
+  opacity: 0.22;
+  cursor: default;
+}
+
+.timer-btn-primary {
+  background: #112211;
+  color: #00ff3a;
+  border-color: #00aa22;
+  font-weight: bold;
+}
+
+.timer-btn-primary:hover:not(:disabled) {
+  background: #1a3a1a;
+  border-color: #00ff3a;
+}
+
+/* ── Inline task edit input ──────────────────────────────────────────────── */
+.task-edit-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #263026;
+  color: #c8d8c8;
+  font-family: 'Consolas', monospace;
+  font-size: 0.72rem;
+  padding: 1px 3px;
+  outline: none;
+}
+
+.task-edit-input:focus {
+  border-bottom-color: #00ff3a;
+  color: #e8f8e8;
+}
+
+.task-edit-input::placeholder {
+  color: #3a5a3a;
+}
+
+/* ── Task list ────────────────────────────────────────────────────────────── */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  min-width: 280px;
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: #0d100d;
+  border: 1px solid #263026;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  color: #c8d8c8;
+}
+
+.task-item .task-title {
+  flex: 1;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.task-item .task-badge {
+  font-size: 0.6rem;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: #1b2e1b;
+  color: #00ff3a;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.task-item .task-badge.todoist {
+  background: #2e1b1b;
+  color: #ff6b6b;
+}
+
+.task-item button {
+  border: none;
+  background: transparent;
+  color: #6a8a6a;
+  cursor: pointer;
+  padding: 0 3px;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.task-item button:hover:not(:disabled) {
+  color: #00ff3a;
+}
+
+.task-item button:disabled {
+  opacity: 0.25;
+  cursor: default;
+}

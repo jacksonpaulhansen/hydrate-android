@@ -235,35 +235,53 @@ function openPath(targetPath) {
 }
 
 function runCommand(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: projectRoot,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options,
+  const spawnOnce = (cmd, cmdArgs, extra = {}) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(cmd, cmdArgs, {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        ...options,
+        ...extra,
+      });
+
+      let output = '';
+      child.stdout.on('data', (chunk) => {
+        output += String(chunk);
+      });
+      child.stderr.on('data', (chunk) => {
+        output += String(chunk);
+      });
+      child.on('error', (err) => {
+        err.output = output;
+        reject(err);
+      });
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve(output);
+        } else {
+          reject(new Error(output || `${cmd} ${cmdArgs.join(' ')} failed with code ${code}`));
+        }
+      });
     });
 
-    let output = '';
-    child.stdout.on('data', (chunk) => {
-      output += String(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      output += String(chunk);
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve(output);
-      } else {
-        reject(new Error(output || `${command} ${args.join(' ')} failed with code ${code}`));
+  return (async () => {
+    try {
+      return await spawnOnce(command, args);
+    } catch (error) {
+      if (process.platform === 'win32' && String(error?.code || '') === 'EINVAL') {
+        // Windows fallback for sporadic spawn EINVAL from .cmd invocations.
+        return await spawnOnce('cmd.exe', ['/d', '/s', '/c', command, ...args]);
       }
-    });
-  });
+      throw error;
+    }
+  })();
 }
 
 async function runEhpkBuild(appNameRaw) {
   const logs = [];
   const appName = String(appNameRaw || '').trim() || 'even-g2-app';
+  const ehpkName = appName.slice(0, 20);
   const safeName = sanitizeRepoName(appName);
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
@@ -286,7 +304,10 @@ async function runEhpkBuild(appNameRaw) {
   }
 
   const appJson = JSON.parse(fs.readFileSync(appJsonPath, 'utf8'));
-  appJson.name = appName;
+  if (appName !== ehpkName) {
+    logs.push(`App name trimmed for EHPK (max 20 chars): "${appName}" -> "${ehpkName}"`);
+  }
+  appJson.name = ehpkName;
   appJson.entrypoint = 'index.html';
   appJson.version = String(appJson.version || '0.1.0');
   if (!appJson.package_id || String(appJson.package_id).includes('example')) {
@@ -297,7 +318,7 @@ async function runEhpkBuild(appNameRaw) {
   fs.mkdirSync(outputDir, { recursive: true });
 
   logs.push(`Packing .ehpk (${outputFile})...`);
-  await runCommand(npxCmd, [
+  const packOutput = await runCommand(npxCmd, [
     '@evenrealities/evenhub-cli',
     'pack',
     'app.json',
@@ -306,12 +327,32 @@ async function runEhpkBuild(appNameRaw) {
     outputPath,
   ]);
 
-  logs.push(`Created package: ${outputPath}`);
+  if (/invalid app\.json/i.test(String(packOutput))) {
+    throw new Error(`EHPK pack failed: ${String(packOutput).trim()}`);
+  }
+
+  let finalOutputPath = outputPath;
+  if (!fs.existsSync(finalOutputPath)) {
+    const candidates = fs
+      .readdirSync(outputDir, { withFileTypes: true })
+      .filter((d) => d.isFile() && d.name.toLowerCase().endsWith('.ehpk'))
+      .map((d) => path.join(outputDir, d.name))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    if (candidates.length > 0) {
+      finalOutputPath = candidates[0];
+    } else {
+      throw new Error(
+        `EHPK pack reported success but no output file was created. CLI output:\n${String(packOutput).trim()}`,
+      );
+    }
+  }
+
+  logs.push(`Created package: ${finalOutputPath}`);
   openPath(outputDir);
 
   return {
     logs: logs.join('\n'),
-    outputPath,
+    outputPath: finalOutputPath,
     outputFile,
   };
 }
@@ -633,7 +674,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'control-server',
       version: apiVersion,
-      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk'],
+      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk', 'todoist'],
     });
     return;
   }
@@ -922,6 +963,82 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 500, { ok: false, error: String(error) });
       }
     });
+    return;
+  }
+
+  // ── Todoist proxy ────────────────────────────────────────────────────────
+
+  if (req.method === 'POST' && req.url === '/todoist/token') {
+    let body = '';
+    req.on('data', (chunk) => { body += String(chunk); });
+    req.on('end', () => {
+      try {
+        const payload = body ? JSON.parse(body) : {};
+        const token = String(payload.token ?? '').trim();
+        const projectId = String(payload.projectId ?? '').trim();
+        const secrets = readLocalSecrets();
+        secrets.todoistToken = token;
+        secrets.todoistProjectId = projectId;
+        writeLocalSecrets(secrets);
+        sendJson(res, 200, { ok: true });
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: String(error) });
+      }
+    });
+    return;
+  }
+
+  const closeTaskMatch = req.url.match(/^\/todoist\/tasks\/([^/]+)\/close$/);
+  if (req.method === 'POST' && closeTaskMatch) {
+    const taskId = closeTaskMatch[1];
+    const secrets = readLocalSecrets();
+    const token = String(secrets.todoistToken ?? '').trim();
+    if (!token) {
+      sendJson(res, 400, { ok: false, error: 'TODOIST_TOKEN_REQUIRED' });
+      return;
+    }
+    try {
+      const response = await fetch(
+        `https://api.todoist.com/rest/v2/tasks/${encodeURIComponent(taskId)}/close`,
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (response.status === 204 || response.ok) {
+        sendJson(res, 200, { ok: true });
+      } else {
+        const text = await response.text().catch(() => '');
+        sendJson(res, response.status, { ok: false, error: `Todoist close failed: ${response.status}`, detail: text });
+      }
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: String(error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/todoist/tasks')) {
+    const secrets = readLocalSecrets();
+    const token = String(secrets.todoistToken ?? '').trim();
+    if (!token) {
+      sendJson(res, 400, { ok: false, error: 'TODOIST_TOKEN_REQUIRED' });
+      return;
+    }
+    const urlObj = new URL(req.url, `http://${host}`);
+    const projectId = urlObj.searchParams.get('project_id') ?? '';
+    const apiUrl = projectId
+      ? `https://api.todoist.com/rest/v2/tasks?project_id=${encodeURIComponent(projectId)}`
+      : 'https://api.todoist.com/rest/v2/tasks';
+    try {
+      const response = await fetch(apiUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await response.json().catch(() => null);
+      if (!response.ok) {
+        sendJson(res, response.status, { ok: false, error: `Todoist API error: ${response.status}`, detail: json });
+        return;
+      }
+      sendJson(res, 200, { ok: true, tasks: json });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: String(error) });
+    }
     return;
   }
 

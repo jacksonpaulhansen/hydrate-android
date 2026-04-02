@@ -12,6 +12,9 @@ import {
 type InputAction = 'CLICK' | 'UP' | 'DOWN' | 'DOUBLE_CLICK';
 type PomodoroMode = 'FOCUS' | 'BREAK';
 type TransitionMode = 'AUTO' | 'MANUAL';
+type AppPhase = 'TIMER' | 'TASK_REVIEW' | 'TASK_CHANGE';
+type TaskSource = 'TODOIST' | 'MANUAL';
+type Task = { id: string; title: string; source: TaskSource; };
 
 type AppState = {
   mode: PomodoroMode;
@@ -33,6 +36,13 @@ type AppState = {
   transitionSeconds: number;
   focusMinutes: number;
   breakMinutes: number;
+  phase: AppPhase;
+  currentTask: Task | null;
+  taskQueue: Task[];
+  todoistToken: string;
+  todoistProjectId: string;
+  taskReviewExtendMinutes: number;
+  taskReviewPending: boolean;
 };
 
 const MAIN_CONTAINER_ID = 1;
@@ -48,7 +58,11 @@ const MAIN_PANEL_WIDTH = 528;
 const FLASH_ROWS = 10;
 const TICK_INTERVAL_MS = 50;
 const HIDE_DEBUG_TOOLS = true;
+const LS_MANUAL_TASKS = 'pomodoro_manual_tasks';
+const LS_TODOIST_TOKEN = 'pomodoro_todoist_token';
+const LS_TODOIST_PROJECT_ID = 'pomodoro_todoist_project_id';
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
+const MAX_APP_NAME_LENGTH = 20;
 
 const state: AppState = {
   mode: 'FOCUS',
@@ -56,7 +70,7 @@ const state: AppState = {
   running: false,
   publishStatus: 'IDLE',
   deployed: false,
-  transitionMode: 'AUTO',
+  transitionMode: 'MANUAL',
   inTransition: false,
   pendingMode: null,
   transitionRemainingSeconds: 0,
@@ -70,6 +84,13 @@ const state: AppState = {
   transitionSeconds: TRANSITION_SECONDS,
   focusMinutes: DEFAULT_FOCUS_MINUTES,
   breakMinutes: DEFAULT_BREAK_MINUTES,
+  phase: 'TIMER',
+  currentTask: null,
+  taskQueue: [],
+  todoistToken: '',
+  todoistProjectId: '',
+  taskReviewExtendMinutes: 5,
+  taskReviewPending: false,
 };
 
 let bridge: EvenAppBridge | null = null;
@@ -86,8 +107,8 @@ const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app root element');
 
 app.innerHTML = `
-  <main class="hud-shell">
-    <fieldset class="group-box">
+  <main id="hud-main" class="hud-shell">
+    <fieldset id="user-settings-fieldset" class="group-box collapsible">
       <legend>User Settings</legend>
 
       <fieldset class="group-box compact-box">
@@ -167,6 +188,54 @@ app.innerHTML = `
 
     </fieldset>
 
+    <fieldset class="group-box">
+      <legend>Tasks</legend>
+
+      <div class="browser-timer" id="browser-timer">
+        <div class="browser-timer-header">
+          <span id="browser-timer-mode" class="browser-timer-mode">FOCUS</span>
+          <span id="browser-timer-phase" class="browser-timer-phase"></span>
+        </div>
+        <div id="browser-timer-time" class="browser-timer-time">25:00</div>
+        <div id="browser-timer-task" class="browser-timer-task"></div>
+        <div class="browser-timer-controls">
+          <button id="btn-timer-up"    class="timer-btn" type="button">↑ Focus</button>
+          <button id="btn-timer-click" class="timer-btn timer-btn-primary" type="button">▶ Start</button>
+          <button id="btn-timer-dbl"   class="timer-btn" type="button">⇄ Change</button>
+          <button id="btn-timer-down"  class="timer-btn" type="button">↓ Break</button>
+        </div>
+      </div>
+
+      <fieldset id="todoist-fieldset" class="group-box compact-box collapsible">
+        <legend>Todoist</legend>
+        <div class="settings-row">
+          <div class="mini-field">
+            <label for="todoist-token">Token</label>
+            <input id="todoist-token" type="password" placeholder="API token" style="width:120px;" />
+          </div>
+          <div class="mini-field">
+            <label for="todoist-project-id">Project ID</label>
+            <input id="todoist-project-id" type="text" placeholder="e.g. 2345678901" style="width:110px;" />
+          </div>
+        </div>
+        <div class="controls">
+          <button id="todoist-fetch-btn" type="button">Fetch Tasks</button>
+          <span id="todoist-status" style="font-size:0.75rem;color:#6a8a6a;">–</span>
+        </div>
+      </fieldset>
+
+      <fieldset class="group-box compact-box">
+        <legend>Queue</legend>
+        <div id="task-queue-list" class="task-list"></div>
+        <div class="controls" style="margin-top:4px;">
+          <button id="add-task-btn" type="button">Add</button>
+          <button id="clear-tasks-btn" type="button">Clear All</button>
+          <span id="current-task-label" style="font-size:0.72rem;color:#00ff3a;margin-left:6px;"></span>
+        </div>
+      </fieldset>
+
+    </fieldset>
+
     <fieldset id="debug-tools" class="group-box" ${HIDE_DEBUG_TOOLS ? 'style="display:none;"' : ''}>
       <legend>Debug Tools</legend>
       <div class="controls">
@@ -176,7 +245,7 @@ app.innerHTML = `
       </div>
       <pre id="event-log" class="event-log"></pre>
       <pre id="publish-log" class="publish-log"></pre>
-      
+
       <div class="sim-display">
         <pre id="hud-main-preview" class="hud-preview hud-preview-main"></pre>
       </div>
@@ -206,6 +275,25 @@ const eventLog = document.querySelector<HTMLPreElement>('#event-log')!;
 const publishLog = document.querySelector<HTMLPreElement>('#publish-log')!;
 const eventLines: string[] = [];
 const DISPLAY_COLUMNS = 52;
+const hudMainEl = document.querySelector<HTMLElement>('#hud-main')!;
+const userSettingsFieldset = document.querySelector<HTMLFieldSetElement>('#user-settings-fieldset')!;
+const todoistFieldset = document.querySelector<HTMLFieldSetElement>('#todoist-fieldset')!;
+const browserTimerMode = document.querySelector<HTMLSpanElement>('#browser-timer-mode')!;
+const browserTimerPhase = document.querySelector<HTMLSpanElement>('#browser-timer-phase')!;
+const browserTimerTime = document.querySelector<HTMLDivElement>('#browser-timer-time')!;
+const browserTimerTask = document.querySelector<HTMLDivElement>('#browser-timer-task')!;
+const btnTimerUp = document.querySelector<HTMLButtonElement>('#btn-timer-up')!;
+const btnTimerClick = document.querySelector<HTMLButtonElement>('#btn-timer-click')!;
+const btnTimerDbl = document.querySelector<HTMLButtonElement>('#btn-timer-dbl')!;
+const btnTimerDown = document.querySelector<HTMLButtonElement>('#btn-timer-down')!;
+const todoistTokenInput = document.querySelector<HTMLInputElement>('#todoist-token')!;
+const todoistProjectIdInput = document.querySelector<HTMLInputElement>('#todoist-project-id')!;
+const todoistFetchBtn = document.querySelector<HTMLButtonElement>('#todoist-fetch-btn')!;
+const todoistStatus = document.querySelector<HTMLSpanElement>('#todoist-status')!;
+const addTaskBtn = document.querySelector<HTMLButtonElement>('#add-task-btn')!;
+const taskQueueList = document.querySelector<HTMLDivElement>('#task-queue-list')!;
+const clearTasksBtn = document.querySelector<HTMLButtonElement>('#clear-tasks-btn')!;
+const currentTaskLabel = document.querySelector<HTMLSpanElement>('#current-task-label')!;
 
 const mainPanelLeftPercent = (MAIN_PANEL_X / DISPLAY_WIDTH) * 100;
 const mainPanelWidthPercent = (MAIN_PANEL_WIDTH / DISPLAY_WIDTH) * 100;
@@ -227,6 +315,10 @@ function clampInt(value: number, min: number, max: number): number {
 function clampFloat(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, value));
+}
+
+function clampAppName(value: string): string {
+  return String(value || '').trim().slice(0, MAX_APP_NAME_LENGTH);
 }
 
 function charCellWidth(char: string): number {
@@ -295,6 +387,19 @@ function startTransition(nextMode: PomodoroMode): void {
 
 function completeTransition(startRunning: boolean): void {
   if (!state.pendingMode) return;
+
+  if (state.taskReviewPending) {
+    state.taskReviewPending = false;
+    state.inTransition = false;
+    state.pendingMode = null;
+    state.transitionRemainingSeconds = 0;
+    state.transitionElapsedMs = 0;
+    state.phase = 'TASK_REVIEW';
+    state.running = false;
+    lastTickMs = Date.now();
+    return;
+  }
+
   state.mode = state.pendingMode;
   state.pendingMode = null;
   state.inTransition = false;
@@ -303,7 +408,205 @@ function completeTransition(startRunning: boolean): void {
   state.remainingSeconds = secondsForMode(state.mode);
   state.running = startRunning;
   lastTickMs = Date.now();
+  if (state.mode === 'FOCUS') {
+    state.currentTask = state.taskQueue[0] ?? null;
+    renderTaskList();
+  }
 }
+
+// ── Task helpers ────────────────────────────────────────────────────────────
+
+function truncateTask(title: string, maxLen: number): string {
+  const upper = title.toUpperCase();
+  const trunc = upper.length > maxLen ? upper.slice(0, maxLen - 1) + '\u2026' : upper;
+  return trunc.padEnd(maxLen, ' ');
+}
+
+function saveManualTasksToStorage(): void {
+  const manual = state.taskQueue.filter((t) => t.source === 'MANUAL');
+  localStorage.setItem(LS_MANUAL_TASKS, JSON.stringify(manual));
+}
+
+function renderTaskList(): void {
+  taskQueueList.innerHTML = '';
+  state.taskQueue.forEach((task, i) => {
+    const item = document.createElement('div');
+    item.className = 'task-item';
+
+    const badge = document.createElement('span');
+    badge.className = `task-badge${task.source === 'TODOIST' ? ' todoist' : ''}`;
+    badge.textContent = task.source === 'TODOIST' ? 'T' : 'M';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'task-edit-input';
+    input.value = task.title;
+    input.placeholder = 'Task name…';
+    input.addEventListener('input', () => {
+      state.taskQueue[i].title = input.value;
+      if (state.currentTask?.id === task.id) state.currentTask.title = input.value;
+      saveManualTasksToStorage();
+      currentTaskLabel.textContent = state.currentTask ? `Active: ${state.currentTask.title}` : '';
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+    });
+    input.addEventListener('blur', () => void render());
+
+    const upBtn = document.createElement('button');
+    upBtn.textContent = '▲';
+    upBtn.title = 'Move up';
+    upBtn.disabled = i === 0;
+    upBtn.addEventListener('click', () => {
+      if (i > 0) {
+        [state.taskQueue[i - 1], state.taskQueue[i]] = [state.taskQueue[i], state.taskQueue[i - 1]];
+        saveManualTasksToStorage();
+        renderTaskList();
+        void render();
+      }
+    });
+
+    const downBtn = document.createElement('button');
+    downBtn.textContent = '▼';
+    downBtn.title = 'Move down';
+    downBtn.disabled = i === state.taskQueue.length - 1;
+    downBtn.addEventListener('click', () => {
+      if (i < state.taskQueue.length - 1) {
+        [state.taskQueue[i], state.taskQueue[i + 1]] = [state.taskQueue[i + 1], state.taskQueue[i]];
+        saveManualTasksToStorage();
+        renderTaskList();
+        void render();
+      }
+    });
+
+    const removeBtn = document.createElement('button');
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove';
+    removeBtn.addEventListener('click', () => {
+      state.taskQueue.splice(i, 1);
+      if (state.currentTask?.id === task.id) state.currentTask = state.taskQueue[0] ?? null;
+      saveManualTasksToStorage();
+      renderTaskList();
+      void render();
+    });
+
+    item.append(badge, input, upBtn, downBtn, removeBtn);
+    taskQueueList.appendChild(item);
+  });
+
+  currentTaskLabel.textContent = state.currentTask ? `Active: ${state.currentTask.title}` : '';
+}
+
+function loadTasksFromStorage(): void {
+  try {
+    const raw = localStorage.getItem(LS_MANUAL_TASKS);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Task[];
+      state.taskQueue = parsed.filter((t) => t && t.id && t.title);
+    }
+  } catch {}
+  state.todoistToken = localStorage.getItem(LS_TODOIST_TOKEN) ?? '';
+  state.todoistProjectId = localStorage.getItem(LS_TODOIST_PROJECT_ID) ?? '';
+}
+
+function dequeueNextTask(): void {
+  state.taskQueue.shift();
+  state.currentTask = state.taskQueue[0] ?? null;
+  saveManualTasksToStorage();
+  renderTaskList();
+}
+
+function markTaskDone(): void {
+  if (state.currentTask?.source === 'TODOIST' && state.currentTask.id) {
+    const taskId = state.currentTask.id;
+    fetch(`${CONTROL_URL}/todoist/tasks/${encodeURIComponent(taskId)}/close`, { method: 'POST' }).catch((err) => {
+      console.warn('[todoist] close task failed:', err);
+    });
+  }
+  dequeueNextTask();
+}
+
+
+function enterTaskReview(): void {
+  if (state.transitionMode === 'AUTO') {
+    // AUTO: mark done, flash, go straight to BREAK — no review prompt
+    markTaskDone();
+    startTransition('BREAK');
+  } else {
+    // MANUAL: flash first, then completeTransition intercepts into TASK_REVIEW
+    state.taskReviewPending = true;
+    startTransition('BREAK');
+  }
+}
+
+function extendFocusSession(minutes: number): void {
+  state.mode = 'FOCUS';
+  state.remainingSeconds = minutes * 60;
+  state.phase = 'TIMER';
+  state.running = true;
+  lastTickMs = Date.now();
+}
+
+async function fetchTodoistTasks(): Promise<void> {
+  const token = todoistTokenInput.value.trim();
+  const projectId = todoistProjectIdInput.value.trim();
+
+  if (!token) {
+    todoistStatus.textContent = 'Token required';
+    return;
+  }
+
+  // Persist credentials
+  state.todoistToken = token;
+  state.todoistProjectId = projectId;
+  localStorage.setItem(LS_TODOIST_TOKEN, token);
+  localStorage.setItem(LS_TODOIST_PROJECT_ID, projectId);
+  await fetch(`${CONTROL_URL}/todoist/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, projectId }),
+  }).catch(() => {});
+
+  todoistStatus.textContent = 'Fetching…';
+  todoistFetchBtn.disabled = true;
+
+  try {
+    const url = projectId
+      ? `${CONTROL_URL}/todoist/tasks?project_id=${encodeURIComponent(projectId)}`
+      : `${CONTROL_URL}/todoist/tasks`;
+    const response = await fetch(url, { cache: 'no-store' });
+    const body = (await response.json().catch(() => null)) as { ok?: boolean; tasks?: any[]; error?: string } | null;
+
+    if (!response.ok || !body?.ok) {
+      todoistStatus.textContent = `Error: ${body?.error ?? response.status}`;
+      return;
+    }
+
+    const incoming: Task[] = (body.tasks ?? []).map((t: any) => ({
+      id: String(t.id ?? t.task_id ?? ''),
+      title: String(t.content ?? t.title ?? ''),
+      source: 'TODOIST' as TaskSource,
+    }));
+
+    const existingIds = new Set(state.taskQueue.filter((t) => t.source === 'TODOIST').map((t) => t.id));
+    const newTasks = incoming.filter((t) => t.id && t.title && !existingIds.has(t.id));
+    state.taskQueue.push(...newTasks);
+
+    if (!state.currentTask && state.taskQueue.length > 0) {
+      state.currentTask = state.taskQueue[0];
+    }
+
+    todoistStatus.textContent = `+${newTasks.length} tasks (${state.taskQueue.length} total)`;
+    renderTaskList();
+    void render();
+  } catch (err) {
+    todoistStatus.textContent = `Error: ${String(err)}`;
+  } finally {
+    todoistFetchBtn.disabled = false;
+  }
+}
+
+// ── End task helpers ─────────────────────────────────────────────────────────
 
 function buildFullFlashText(char: string, qty: number, rows: number): string {
   const safeChar = (char && char.length > 0 ? char : '#').slice(0, 1);
@@ -328,25 +631,46 @@ function getCurrentFlashSpec(): { char: string; qty: number } {
 
 function buildMainHudText(): string {
   if (state.inTransition && state.pendingMode) {
-    if (state.transitionMode === 'MANUAL') {
-      const totalMs = Math.max(1, Math.floor(state.transitionSeconds * 1000));
-      if (state.transitionElapsedMs >= totalMs) {
-        return [
-          `${state.mode} -> ${state.pendingMode}`,
-          'CLICK to continue',
-        ].join('\n');
-      }
-    }
-
+    // Always show flash — never show "X -> Y / CLICK to continue" text
     const spec = getCurrentFlashSpec();
     return buildFullFlashText(spec.char, spec.qty, FLASH_ROWS);
   }
 
-  return [
+  if (state.phase === 'TASK_REVIEW') {
+    const taskLine = state.currentTask
+      ? truncateTask(state.currentTask.title, DISPLAY_COLUMNS)
+      : '(NO TASK)'.padEnd(DISPLAY_COLUMNS);
+    const extMin = state.taskReviewExtendMinutes;
+    return [
+      taskLine,
+      `UP:DONE`.padEnd(DISPLAY_COLUMNS),
+      `DN:+${extMin} MIN`.padEnd(DISPLAY_COLUMNS),
+    ].join('\n');
+  }
+
+  if (state.phase === 'TASK_CHANGE') {
+    const taskLine = state.currentTask
+      ? truncateTask(state.currentTask.title, DISPLAY_COLUMNS)
+      : '(NO TASK)'.padEnd(DISPLAY_COLUMNS);
+    const hint = 'SKIP? CLK=End session  DN=Stay'.padEnd(DISPLAY_COLUMNS);
+    return [taskLine, hint].join('\n');
+  }
+
+  const timerLine = [
     state.mode, ':',
-    state.running ? "▶" : "ll",
-    formatTime(state.remainingSeconds)
+    state.running ? '\u25b6' : 'll',
+    formatTime(state.remainingSeconds),
   ].join(' ');
+
+  const lines: string[] = [];
+  if (state.currentTask) {
+    lines.push(truncateTask(state.currentTask.title, DISPLAY_COLUMNS));
+  }
+  lines.push(timerLine);
+  if (!state.inTransition) {
+    lines.push((state.running ? 'CLICK:Pause  DBL:Change' : 'CLICK:Start  DBL:Change').padEnd(DISPLAY_COLUMNS));
+  }
+  return lines.join('\n');
 }
 
 async function pushHudToEvenHub(): Promise<void> {
@@ -365,7 +689,55 @@ async function pushHudToEvenHub(): Promise<void> {
   );
 }
 
+function updateBrowserTimer(): void {
+  browserTimerMode.textContent = state.mode;
+  browserTimerTask.textContent = state.currentTask?.title ?? '';
+
+  // Only collapse on play — never auto-expand on pause
+  if (state.running) hudMainEl.classList.add('timer-active');
+
+  if (state.phase === 'TASK_REVIEW') {
+    const extMin = state.taskReviewExtendMinutes;
+    browserTimerTime.textContent = formatTime(state.remainingSeconds);
+    browserTimerPhase.textContent = 'Done?';
+    btnTimerUp.textContent = '✓ Done';       btnTimerUp.disabled = false;  btnTimerUp.className = 'timer-btn timer-btn-primary';
+    btnTimerClick.textContent = '—';         btnTimerClick.disabled = true; btnTimerClick.className = 'timer-btn';
+    btnTimerDbl.textContent = '—';           btnTimerDbl.disabled = true;  btnTimerDbl.className = 'timer-btn';
+    btnTimerDown.textContent = `+${extMin} min`; btnTimerDown.disabled = false; btnTimerDown.className = 'timer-btn';
+    return;
+  } else if (state.phase === 'TASK_CHANGE') {
+    browserTimerTime.textContent = formatTime(state.remainingSeconds);
+    browserTimerPhase.textContent = 'Skip?';
+    btnTimerUp.textContent = '—';          btnTimerUp.disabled = true;
+    btnTimerClick.textContent = 'End Session'; btnTimerClick.disabled = false;
+    btnTimerDbl.textContent = '—';         btnTimerDbl.disabled = true;
+    btnTimerDown.textContent = 'Stay';     btnTimerDown.disabled = false;
+  } else if (state.inTransition) {
+    browserTimerTime.textContent = state.transitionMode === 'AUTO'
+      ? formatTime(state.transitionRemainingSeconds)
+      : '…';
+    const manualReady = state.transitionMode === 'MANUAL'
+      && state.transitionElapsedMs >= Math.floor(state.transitionSeconds * 1000);
+    browserTimerPhase.textContent = manualReady ? 'Click to continue' : 'transitioning';
+    btnTimerUp.textContent = '—';  btnTimerUp.disabled = true;
+    btnTimerClick.textContent = manualReady ? 'Continue →' : '…';
+    btnTimerClick.disabled = !manualReady;
+    btnTimerDbl.textContent = '—'; btnTimerDbl.disabled = true;
+    btnTimerDown.textContent = '—'; btnTimerDown.disabled = true;
+  } else {
+    browserTimerTime.textContent = formatTime(state.remainingSeconds);
+    browserTimerPhase.textContent = state.running ? '' : 'paused';
+    btnTimerUp.textContent = '↑ Focus';    btnTimerUp.disabled = false;  btnTimerUp.className = 'timer-btn';
+    btnTimerClick.textContent = state.running ? '⏸ Pause' : '▶ Start';
+    btnTimerClick.disabled = false;        btnTimerClick.className = 'timer-btn timer-btn-primary';
+    btnTimerDbl.textContent = state.running ? '⇄ Change' : 'Reset';
+    btnTimerDbl.disabled = false;          btnTimerDbl.className = 'timer-btn';
+    btnTimerDown.textContent = '↓ Break';  btnTimerDown.disabled = false; btnTimerDown.className = 'timer-btn';
+  }
+}
+
 async function render(): Promise<void> {
+  updateBrowserTimer();
   hudMainPreview.textContent = buildMainHudText();
   publishStatus.textContent = state.publishStatus;
   publishBtn.textContent = state.deployed ? 'Update App' : 'Publish App';
@@ -418,8 +790,11 @@ function tickPomodoro(): void {
   state.remainingSeconds -= deltaSeconds;
 
   while (state.remainingSeconds <= 0) {
-    const nextMode: PomodoroMode = state.mode === 'FOCUS' ? 'BREAK' : 'FOCUS';
-    startTransition(nextMode);
+    if (state.mode === 'FOCUS') {
+      enterTaskReview();
+    } else {
+      startTransition('FOCUS');
+    }
     break;
   }
 
@@ -427,12 +802,49 @@ function tickPomodoro(): void {
 }
 
 async function applyAction(action: InputAction): Promise<void> {
+  // ── TASK_REVIEW: after flash, ask about 5 more mins ─────────────────────
+  if (state.phase === 'TASK_REVIEW') {
+    if (action === 'UP' || action === 'CLICK') {
+      // Done — go directly to break, no flash
+      markTaskDone();
+      setMode('BREAK');
+      state.phase = 'TIMER';
+    } else if (action === 'DOWN') {
+      // +X more minutes — back to focus
+      extendFocusSession(state.taskReviewExtendMinutes);
+    }
+    await render();
+    return;
+  }
+
+  // ── TASK_CHANGE: DBL_CLICK mid-session to skip or stay ──────────────────
+  if (state.phase === 'TASK_CHANGE') {
+    if (action === 'CLICK') {
+      // End session early: skip task, go directly to break, no flash or review
+      markTaskDone();
+      setMode('BREAK');
+    } else if (action === 'DOWN' || action === 'DOUBLE_CLICK') {
+      // Stay: resume timer
+      state.phase = 'TIMER';
+      state.running = true;
+      lastTickMs = Date.now();
+    }
+    await render();
+    return;
+  }
+
+  // ── Normal TIMER phase ───────────────────────────────────────────────────
   if (action === 'CLICK') {
-    console.log('CLICK');
     toggleRunPause();
   } else if (action === 'DOUBLE_CLICK') {
-    state.running = false;
-    resetCurrentMode();
+    if (state.mode === 'FOCUS' && state.running) {
+      // Open change/skip menu
+      state.running = false;
+      state.phase = 'TASK_CHANGE';
+    } else {
+      state.running = false;
+      resetCurrentMode();
+    }
   } else if (action === 'UP') {
     setMode('FOCUS');
   } else if (action === 'DOWN') {
@@ -570,12 +982,12 @@ async function publishApp(): Promise<void> {
     | null;
 
   const savedRepoName = (configBody?.config?.github?.repo ?? '').trim();
-  const defaultAppName = savedRepoName || configBody?.config?.appName || 'even-g2-pomodoro';
+  const defaultAppName = clampAppName(savedRepoName || configBody?.config?.appName || 'even-g2-pomodoro');
   let appName = defaultAppName;
 
   if (!savedRepoName) {
-    const appNameInput = window.prompt('App name (used as GitHub repo name):', defaultAppName);
-    appName = (appNameInput ?? '').trim();
+    const appNameInput = window.prompt(`App name (max ${MAX_APP_NAME_LENGTH} chars):`, defaultAppName);
+    appName = clampAppName(appNameInput ?? '');
     if (!appName) {
       publishLog.textContent = 'Publish cancelled: app name is required.';
       await render();
@@ -651,10 +1063,10 @@ async function buildEhpk(): Promise<void> {
 
   const configResponse = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
   const configBody = (await configResponse?.json().catch(() => null)) as { config?: { appName?: string } } | null;
-  const defaultAppName = (configBody?.config?.appName ?? 'even-g2-app').trim() || 'even-g2-app';
+  const defaultAppName = clampAppName((configBody?.config?.appName ?? 'even-g2-app').trim() || 'even-g2-app');
 
-  const appNameInput = window.prompt('App name for .ehpk package:', defaultAppName);
-  const appName = (appNameInput ?? '').trim();
+  const appNameInput = window.prompt(`App name for .ehpk package (max ${MAX_APP_NAME_LENGTH} chars):`, defaultAppName);
+  const appName = clampAppName(appNameInput ?? '');
   if (!appName) {
     publishLog.textContent = 'Build cancelled: app name is required.';
     await render();
@@ -717,9 +1129,52 @@ function setKeyboardFallback(): void {
 }
 
 async function init(): Promise<void> {
+  loadTasksFromStorage();
+
   setKeyboardFallback();
   publishBtn.addEventListener('click', () => void publishApp());
   ehpkBtn.addEventListener('click', () => void buildEhpk());
+
+  // Task UI wiring
+  todoistTokenInput.value = state.todoistToken;
+  todoistProjectIdInput.value = state.todoistProjectId;
+
+  todoistFetchBtn.addEventListener('click', () => void fetchTodoistTasks());
+
+  addTaskBtn.addEventListener('click', () => {
+    const task: Task = { id: crypto.randomUUID(), title: '', source: 'MANUAL' };
+    state.taskQueue.push(task);
+    if (!state.currentTask) state.currentTask = task;
+    saveManualTasksToStorage();
+    renderTaskList();
+    // Focus the newly added task's edit input
+    const inputs = taskQueueList.querySelectorAll<HTMLInputElement>('.task-edit-input');
+    inputs[inputs.length - 1]?.focus();
+    void render();
+  });
+
+  clearTasksBtn.addEventListener('click', () => {
+    state.taskQueue = [];
+    state.currentTask = null;
+    saveManualTasksToStorage();
+    renderTaskList();
+    void render();
+  });
+
+  renderTaskList();
+
+  // Browser timer buttons
+  btnTimerUp.addEventListener('click',    () => void applyAction('UP'));
+  btnTimerClick.addEventListener('click', () => void applyAction('CLICK'));
+  btnTimerDbl.addEventListener('click',   () => void applyAction('DOUBLE_CLICK'));
+  btnTimerDown.addEventListener('click',  () => void applyAction('DOWN'));
+
+  // Collapsible legend toggles
+  for (const fs of [userSettingsFieldset, todoistFieldset]) {
+    fs.querySelector('legend')!.addEventListener('click', () => {
+      fs.toggleAttribute('data-expanded');
+    });
+  }
 
   transitionModeSelect.value = state.transitionMode;
   focusMinutesInput.value = String(state.focusMinutes);
