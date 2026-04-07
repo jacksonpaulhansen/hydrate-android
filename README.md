@@ -1,59 +1,56 @@
-# Even Breakality (Pomodoro for Even G2)
+# Hydrate
 
-Simulator-first Pomodoro app for Even G2 / Even Hub.
+Hydrate now ships as two companion apps that share the same hydration model:
 
-## Features
+- `Android companion app`
+  Runs from `index.html` / `src/main.ts`
+  Owns reminder scheduling and Android notifications
+- `Even Hub glasses app`
+  Runs from `glasses.html` / `src/glasses.ts`
+  Pushes the Hydrate HUD to G2 through `@evenrealities/even_hub_sdk`
 
-- Focus/Break timer
-- Gesture input support:
-  - `Click` = start/pause
-  - `Double Click` = reset current mode
-  - `Up` = switch to Focus
-  - `Down` = switch to Break
-- Transition modes:
-  - `AUTO`: switches mode after transition duration
-  - `MANUAL`: flashes, then shows `CLICK to continue` on HUD
-- Transition flash customization:
-  - Flash A char + qty
-  - Optional Flash B alternate char + qty
-  - Flash interval (`ms`)
+## What Syncs
 
-## Run locally
+Both apps can:
+
+- add and remove hydration entries
+- edit goal, reminder, and quick-add settings
+- sign into the same Google account
+- auto-sync on open
+- auto-refresh every 5 seconds
+
+## Run Locally
 
 1. Install once:
    - `npm install`
-2. Start with runner:
-   - `run-even-sim.ps1`
-3. Runner starts:
-   - app dev server: `http://127.0.0.1:5173`
-   - control server: `http://127.0.0.1:8787`
-   - Even Hub simulator (if installed/found)
+2. Create `.env` from `.env.example` and fill in Firebase Web app values
+3. In Firebase Console, enable:
+   - Google sign-in in Authentication
+   - Cloud Firestore
+4. Start Vite:
+   - `npm run dev`
+5. Open either page:
+   - Android companion: `http://127.0.0.1:5173/`
+   - Glasses app preview: `http://127.0.0.1:5173/glasses.html`
 
-## User Settings
+## Android App
 
-- `Focus` (mins, decimal allowed)
-- `Break` (mins, decimal allowed)
-- `Transition`:
-  - `Method`: `AUTO` or `MANUAL`
-  - `Sec`: transition duration
-- `Flash A`:
-  - `Char`
-  - `Qty`
-- `Flash B`:
-  - enable/disable via checkbox in header
-  - `Flash` (ms), `Char`, `Qty`
+1. Build and sync web assets into Android:
+   - `npm run build:app`
+2. Open Android Studio:
+   - `npm run android`
 
-## Debug Tools
+The Android app is still the reminder owner. Reminder settings now sync automatically from the cloud, so when the glasses app changes them the phone app picks them up and reschedules reminders on the next sync pass.
 
-- `Publish App`
-- `Build EHPK`
-- Event + publish logs
+## Even Hub / G2 App
 
-Debug tools can be hidden for end users via `HIDE_DEBUG_TOOLS` in `src/main.ts`.
-Local dev toggle shortcut: `Ctrl+Shift+D`.
+- `app.json` now points to `glasses.html`
+- local EHPK builds also package `glasses.html` as the Even Hub entrypoint
+- the G2 app pushes a text HUD summary and a list-based quick add control to the glasses
+- the G2 app uses the same Firebase account state as the phone app for hydration sync
 
-## Publish notes
+## Debug Notes
 
-- Publish flow now targets `main` branch.
-- New repos created by publish flow are private by default.
-- If GitHub Pages deploy fails, verify repository Pages source is set to `GitHub Actions`.
+- Android companion debug toggle: `Ctrl+Shift+D`
+- Glasses app debug toggle: `Ctrl+Shift+D`
+- Glasses app double click: exits through `shutDownPageContainer(0)` when running inside Even Hub

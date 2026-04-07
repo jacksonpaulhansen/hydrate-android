@@ -1,25 +1,7 @@
 {
-  "package_id": "com.evenbreakalitypomodoroapp",
-  "edition": "202601",
-  "name": "even_break-ality",
+  "name": "Hydrate",
+  "package_id": "com.hydrate.glasses",
   "version": "0.1.0",
-  "min_app_version": "2.0.0",
-  "min_sdk_version": "0.0.7",
-  "entrypoint": "index.html",
-  "permissions": [
-    {
-      "name": "network",
-      "desc": "This app needs to access the network in order to ...",
-      "whitelist": [
-        "https://example.com"
-      ]
-    },
-    {
-      "name": "location",
-      "desc": "This app needs to access the location in order to ..."
-    }
-  ],
-  "supported_languages": [
-    "en"
-  ]
+  "entrypoint": "glasses.html",
+  "description": "Hydrate G2 companion app for Even Hub with manual sync to the Android reminder app."
 }

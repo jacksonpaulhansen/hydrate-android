@@ -308,7 +308,7 @@ async function runEhpkBuild(appNameRaw) {
     logs.push(`App name trimmed for EHPK (max 20 chars): "${appName}" -> "${ehpkName}"`);
   }
   appJson.name = ehpkName;
-  appJson.entrypoint = 'index.html';
+  appJson.entrypoint = 'glasses.html';
   appJson.version = String(appJson.version || '0.1.0');
   if (!appJson.package_id || String(appJson.package_id).includes('example')) {
     appJson.package_id = `com.${safeName.replace(/[^a-z0-9.]/g, '') || 'eveng2app'}`;

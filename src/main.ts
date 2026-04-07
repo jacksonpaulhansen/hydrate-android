@@ -1,1239 +1,505 @@
 import './style.css';
+import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import type { User } from 'firebase/auth';
 import {
-  CreateStartUpPageContainer,
-  type EvenAppBridge,
-  OsEventTypeList,
-  RebuildPageContainer,
-  TextContainerProperty,
-  TextContainerUpgrade,
-  waitForEvenAppBridge,
-} from '@evenrealities/even_hub_sdk';
+  addEntry,
+  clampInt,
+  findNextQuickAmountIndex,
+  loadHydrateState,
+  progressPercent,
+  removeEntry,
+  saveHydrateState,
+  touchState,
+  type HydrateState,
+  undoEntry,
+} from './hydrate-shared';
+import {
+  bootstrapCloudSync,
+  fetchRemoteState,
+  isCloudSyncConfigured,
+  listenForUserChange,
+  pushRemoteState,
+  signInWithGoogle,
+  signOutFromCloud,
+  subscribeToRemoteState,
+} from './cloud-sync';
 
-type InputAction = 'CLICK' | 'UP' | 'DOWN' | 'DOUBLE_CLICK';
-type PomodoroMode = 'FOCUS' | 'BREAK';
-type TransitionMode = 'AUTO' | 'MANUAL';
-type AppPhase = 'TIMER' | 'TASK_REVIEW' | 'TASK_CHANGE';
-type TaskSource = 'TODOIST' | 'MANUAL';
-type Task = { id: string; title: string; source: TaskSource; };
-
-type AppState = {
-  mode: PomodoroMode;
-  remainingSeconds: number;
-  running: boolean;
-  publishStatus: string;
-  deployed: boolean;
-  transitionMode: TransitionMode;
-  inTransition: boolean;
-  pendingMode: PomodoroMode | null;
-  transitionRemainingSeconds: number;
-  transitionElapsedMs: number;
-  flashAlternate: boolean;
-  flashIntervalMs: number;
-  flashCharA: string;
-  flashCharB: string;
-  flashQtyA: number;
-  flashQtyB: number;
-  transitionSeconds: number;
-  focusMinutes: number;
-  breakMinutes: number;
-  phase: AppPhase;
-  currentTask: Task | null;
-  taskQueue: Task[];
-  todoistToken: string;
-  todoistProjectId: string;
-  focusBumpMinutes: number;
-  focusBumpMax: number;     // 0 = unlimited
-  breakBumpMinutes: number;
-  breakBumpMax: number;     // 0 = unlimited
-  bumpCount: number;
-  taskReviewPending: boolean;
-  taskReviewSelection: number;
-  taskChangeSelection: number;  // 0=End, 1=Stay, 2=Reset
-};
-
-const MAIN_CONTAINER_ID = 1;
-const MAIN_CONTAINER_NAME = 'mainText';
-const CONTROL_URL = 'http://127.0.0.1:8787';
-const REQUIRED_CONTROL_CAPABILITY = 'publish-app';
-const DEFAULT_FOCUS_MINUTES = 25;
-const DEFAULT_BREAK_MINUTES = 5;
-const TRANSITION_SECONDS = 10;
-const DISPLAY_WIDTH = 576;
-const MAIN_PANEL_X = 24;
-const MAIN_PANEL_WIDTH = 528;
-const FLASH_ROWS = 10;
-const TICK_INTERVAL_MS = 50;
 const HIDE_DEBUG_TOOLS = true;
-const LS_MANUAL_TASKS = 'pomodoro_manual_tasks';
-const LS_TODOIST_TOKEN = 'pomodoro_todoist_token';
-const LS_TODOIST_PROJECT_ID = 'pomodoro_todoist_project_id';
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
-const MAX_APP_NAME_LENGTH = 20;
+const NOTIFICATION_ID = 4242;
+const NOTIFICATION_CHANNEL_ID = 'hydrate-reminders';
 
-const state: AppState = {
-  mode: 'FOCUS',
-  remainingSeconds: DEFAULT_FOCUS_MINUTES * 60,
-  running: false,
-  publishStatus: 'IDLE',
-  deployed: false,
-  transitionMode: 'MANUAL',
-  inTransition: false,
-  pendingMode: null,
-  transitionRemainingSeconds: 0,
-  transitionElapsedMs: 0,
-  flashAlternate: true,
-  flashIntervalMs: 250,
-  flashCharA: '\u25A7',
-  flashCharB: ' ',
-  flashQtyA: 26,
-  flashQtyB: 26,
-  transitionSeconds: TRANSITION_SECONDS,
-  focusMinutes: DEFAULT_FOCUS_MINUTES,
-  breakMinutes: DEFAULT_BREAK_MINUTES,
-  phase: 'TIMER',
-  currentTask: null,
-  taskQueue: [],
-  todoistToken: '',
-  todoistProjectId: '',
-  focusBumpMinutes: 3,
-  focusBumpMax: 2,
-  breakBumpMinutes: 1,
-  breakBumpMax: 2,
-  bumpCount: 0,
-  taskReviewPending: false,
-  taskReviewSelection: 0,
-  taskChangeSelection: 0,
-};
+const isAndroidApp = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+const state: HydrateState = loadHydrateState();
 
-let bridge: EvenAppBridge | null = null;
-let startupCreated = false;
-let lastTickMs = Date.now();
-let lastResolvedAction: InputAction | null = null;
-let lastResolvedActionAt = 0;
-let lastEventSignature = '';
-let lastEventAt = 0;
-let lastEventLabel = '';
 let debugToolsVisible = !HIDE_DEBUG_TOOLS;
-let didAutoCollapse = false;
+let reminderTimer: number | null = null;
+let syncStatus = 'Waiting for cloud sync';
+let debugStatus = 'Ready';
+let authStatus = isCloudSyncConfigured() ? 'Checking sign-in...' : 'Firebase config missing';
+let currentUser: User | null = null;
+let syncUnsubscribe: (() => void) | null = null;
+let syncPollTimer: number | null = null;
+let lastRemoteSeenAt = '';
+let pushQueued = false;
+let pushRunning = false;
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app root element');
 
 app.innerHTML = `
-  <main id="hud-main" class="hud-shell">
-    <fieldset id="user-settings-fieldset" class="group-box collapsible">
+  <main class="hud-shell">
+    <fieldset class="group-box collapsible">
       <legend>User Settings</legend>
-
+      <div class="settings-grid">
+        <div class="mini-field">
+          <label for="daily-goal">Daily Goal</label>
+          <input id="daily-goal" type="number" min="500" max="6000" step="50" />
+          <span class="field-unit">ml</span>
+        </div>
+        <div class="mini-field">
+          <label for="reminder-interval">Reminder</label>
+          <input id="reminder-interval" type="number" min="1" max="240" step="1" />
+          <span class="field-unit">mins</span>
+        </div>
+        <label class="toggle-field" for="reminder-enabled">
+          <input id="reminder-enabled" type="checkbox" />
+          <span>Enable reminders</span>
+        </label>
+      </div>
       <fieldset class="group-box compact-box">
-        <legend>Durations</legend>
-        <div class="settings-row">
-          <div class="mini-field">
-            <label for="focus-minutes">Focus</label>
-            <input id="focus-minutes" type="number" min="0" max="180" step="0.1" value="${DEFAULT_FOCUS_MINUTES}" />
-            <span class="field-unit">mins</span>
-          </div>
-        </div>
-        <div class="settings-row">
-          <div class="mini-field">
-            <label for="break-minutes">Break</label>
-            <input id="break-minutes" type="number" min="0" max="180" step="0.1" value="${DEFAULT_BREAK_MINUTES}" />
-            <span class="field-unit">mins</span>
-          </div>
+        <legend>Quick Add Amounts</legend>
+        <div class="settings-grid settings-grid-compact">
+          <div class="mini-field"><label for="quick-amount-1">Preset 1</label><input id="quick-amount-1" type="number" min="50" max="2000" step="25" /><span class="field-unit">ml</span></div>
+          <div class="mini-field"><label for="quick-amount-2">Preset 2</label><input id="quick-amount-2" type="number" min="50" max="2000" step="25" /><span class="field-unit">ml</span></div>
+          <div class="mini-field"><label for="quick-amount-3">Preset 3</label><input id="quick-amount-3" type="number" min="50" max="2000" step="25" /><span class="field-unit">ml</span></div>
+          <div class="mini-field"><label for="quick-amount-4">Preset 4</label><input id="quick-amount-4" type="number" min="50" max="2000" step="25" /><span class="field-unit">ml</span></div>
         </div>
       </fieldset>
-
-      <fieldset class="group-box compact-box collapsible collapsed">
-        <legend>Time Bump</legend>
-        <div class="settings-row">
-          <div class="mini-field">
-            <label for="focus-bump-mins">Focus</label>
-            <input id="focus-bump-mins" type="number" min="1" max="60" value="3" />
-            <span class="field-unit">mins</span>
-          </div>
-          <div class="mini-field">
-            <label for="focus-bump-max">Max</label>
-            <input id="focus-bump-max" type="number" min="0" max="20" value="2" />
-            <span class="field-unit">0=∞</span>
-          </div>
-        </div>
-        <div class="settings-row">
-          <div class="mini-field">
-            <label for="break-bump-mins">Break</label>
-            <input id="break-bump-mins" type="number" min="1" max="60" value="1" />
-            <span class="field-unit">mins</span>
-          </div>
-          <div class="mini-field">
-            <label for="break-bump-max">Max</label>
-            <input id="break-bump-max" type="number" min="0" max="20" value="2" />
-            <span class="field-unit">0=∞</span>
-          </div>
-        </div>
-      </fieldset>
-
-      <fieldset class="group-box compact-box collapsible collapsed" id="transition-fieldset">
-        <legend>Transition</legend>
-        <div class="settings-row">
-          <div class="mini-field">
-            <label for="transition-mode">Method</label>
-            <select id="transition-mode">
-              <option value="AUTO">AUTO</option>
-              <option value="MANUAL">MANUAL</option>
-            </select>
-          </div>
-          <div class="mini-field">
-            <label for="transition-seconds">Sec</label>
-            <input id="transition-seconds" type="number" min="1" max="300" value="${TRANSITION_SECONDS}" />
-          </div>
-        </div>
-
-        <fieldset class="group-box compact-box">
-          <legend>Flash A</legend>
-          <div class="settings-row">
-            <div class="mini-field">
-              <label for="flash-char-a">Char</label>
-              <input id="flash-char-a" type="text" maxlength="1" value="" />
-            </div>
-            <div class="mini-field">
-              <label for="flash-qty-a">Qty</label>
-              <input id="flash-qty-a" type="number" min="1" max="80" value="26" />
-            </div>
-          </div>
-        </fieldset>
-
-        <fieldset class="group-box compact-box flash-b-box" id="alternate-block">
-            <legend>
-              <label class="legend-toggle" for="flash-alternate">
-                <span>FLASH B</span>
-                <input id="flash-alternate" type="checkbox" checked />
-              </label>
-            </legend>
-            <div class="group-box-body">
-              <div class="settings-row">
-                <div class="mini-field">
-                  <label for="flash-interval-ms">Flash</label>
-                  <input id="flash-interval-ms" type="number" min="50" max="10000" step="50" value="250" />
-                  <span class="field-unit">ms</span>
-                </div>
-                <div class="mini-field">
-                  <label for="flash-char-b">Char</label>
-                  <input id="flash-char-b" type="text" maxlength="1" value="" />
-                </div>
-                <div class="mini-field">
-                  <label for="flash-qty-b">Qty</label>
-                  <input id="flash-qty-b" type="number" min="1" max="80" value="26" />
-                </div>
-              </div>
-            </div>
-          </fieldset>
-      </fieldset>
-
     </fieldset>
 
     <fieldset class="group-box">
-      <legend>Tasks</legend>
+      <legend>Hydrate Companion</legend>
+      <section class="hydrate-panel">
+        <div class="runtime-card runtime-android">
+          <div class="runtime-copy">
+            <div class="runtime-title">Android Companion App</div>
+            <div class="runtime-detail">This app owns reminder scheduling and syncs automatically with the G2 web companion app.</div>
+          </div>
+          <div class="runtime-badge">Android</div>
+        </div>
 
-      <div class="browser-timer" id="browser-timer">
-        <div class="browser-timer-header">
-          <span id="browser-timer-mode" class="browser-timer-mode">FOCUS</span>
-          <span id="browser-timer-phase" class="browser-timer-phase"></span>
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">Phone App</div>
+            <h1 class="panel-title">Hydrate</h1>
+          </div>
+          <div id="today-label" class="today-label"></div>
         </div>
-        <div id="browser-timer-time" class="browser-timer-time">25:00</div>
-        <div id="browser-timer-task" class="browser-timer-task"></div>
-        <div class="browser-timer-controls">
-          <button id="btn-timer-up"    class="timer-btn" type="button">↑ Focus</button>
-          <button id="btn-timer-click" class="timer-btn timer-btn-primary" type="button">▶ Start</button>
-          <button id="btn-timer-dbl"   class="timer-btn" type="button">⇄ Change</button>
-          <button id="btn-timer-down"  class="timer-btn" type="button">↓ Break</button>
+
+        <div class="hero-card">
+          <div class="hero-ring"><div class="hero-ring-inner"><div id="total-ml" class="hero-total">0</div><div class="hero-unit">ml today</div></div></div>
+          <div class="hero-copy">
+            <div id="goal-copy" class="goal-copy"></div>
+            <div class="progress-bar-wrap"><div id="progress-bar" class="progress-bar-fill"></div></div>
+            <div id="progress-copy" class="progress-copy"></div>
+            <div id="last-drink" class="muted-copy"></div>
+          </div>
         </div>
+
+        <div class="section-title">Quick Add</div>
+        <div id="quick-add-grid" class="quick-add-grid"></div>
+
+        <div class="custom-add">
+          <div class="mini-field grow-field">
+            <label for="custom-amount">Custom</label>
+            <input id="custom-amount" type="number" min="1" max="2000" step="25" />
+            <span class="field-unit">ml</span>
+          </div>
+          <button id="custom-add-btn" class="primary-btn" type="button">Add Custom</button>
+        </div>
+
+        <div class="controls controls-spread">
+          <button id="remove-last-btn" type="button">Undo Last</button>
+          <button id="reset-day-btn" type="button">Reset Day</button>
+          <span id="reminder-status" class="status-chip"></span>
+        </div>
+        <div id="next-reminder" class="muted-copy"></div>
+
+        <fieldset class="group-box compact-box collapsible collapsed">
+          <legend>Today's Log</legend>
+          <div id="log-list" class="log-list"></div>
+        </fieldset>
+      </section>
+    </fieldset>
+
+    <fieldset class="group-box">
+      <legend>Account & Auto Sync</legend>
+      <div class="controls">
+        <button id="sign-in-btn" type="button">Sign In With Google</button>
+        <button id="sign-out-btn" type="button">Sign Out</button>
+        <span id="sync-status" class="status-chip"></span>
       </div>
-
-      <fieldset id="todoist-fieldset" class="group-box compact-box collapsible">
-        <legend>Todoist</legend>
-        <div class="settings-row">
-          <div class="mini-field">
-            <label for="todoist-token">Token</label>
-            <input id="todoist-token" type="password" placeholder="API token" style="width:120px;" />
-          </div>
-          <div class="mini-field">
-            <label for="todoist-project-id">Project ID</label>
-            <input id="todoist-project-id" type="text" placeholder="e.g. 2345678901" style="width:110px;" />
-          </div>
-        </div>
-        <div class="controls">
-          <button id="todoist-fetch-btn" type="button">Fetch Tasks</button>
-          <span id="todoist-status" style="font-size:0.75rem;color:#6a8a6a;">–</span>
-        </div>
-      </fieldset>
-
-      <fieldset class="group-box compact-box">
-        <legend>Queue</legend>
-        <div id="task-queue-list" class="task-list"></div>
-        <div class="controls" style="margin-top:4px;">
-          <button id="add-task-btn" type="button">Add</button>
-          <button id="clear-tasks-btn" type="button">Clear All</button>
-          <span id="current-task-label" style="font-size:0.72rem;color:#00ff3a;margin-left:6px;"></span>
-        </div>
-      </fieldset>
-
+      <div id="auth-status" class="muted-copy"></div>
+      <p class="hint">Open both apps while signed into the same Google account and they will sync immediately, then poll every 5 seconds for updates.</p>
     </fieldset>
 
     <fieldset id="debug-tools" class="group-box" ${HIDE_DEBUG_TOOLS ? 'style="display:none;"' : ''}>
       <legend>Debug Tools</legend>
       <div class="controls">
-        <button id="publish-btn" type="button">Publish App</button>
-        <button id="ehpk-btn" type="button">Build EHPK</button>
-        <span id="publish-status">IDLE</span>
+        <button id="request-permission-btn" type="button">Request Notifications</button>
+        <button id="test-reminder-btn" type="button">Test Reminder</button>
+        <span id="debug-status"></span>
       </div>
-      <pre id="event-log" class="event-log"></pre>
-      <pre id="publish-log" class="publish-log"></pre>
-
-      <div class="sim-display">
-        <pre id="hud-main-preview" class="hud-preview hud-preview-main"></pre>
-      </div>
-      <p class="hint">Input: Click=start/pause, Double-click=reset, Up=Focus, Down=Break</p>
+      <p class="hint">Debug tools shortcut: ${DEV_TOOLS_TOGGLE_SHORTCUT}</p>
     </fieldset>
-
   </main>
 `;
 
-const hudMainPreview = document.querySelector<HTMLPreElement>('#hud-main-preview')!;
-const publishBtn = document.querySelector<HTMLButtonElement>('#publish-btn')!;
-const ehpkBtn = document.querySelector<HTMLButtonElement>('#ehpk-btn')!;
+const totalMlValue = document.querySelector<HTMLDivElement>('#total-ml')!;
+const goalCopy = document.querySelector<HTMLDivElement>('#goal-copy')!;
+const progressBar = document.querySelector<HTMLDivElement>('#progress-bar')!;
+const progressCopy = document.querySelector<HTMLDivElement>('#progress-copy')!;
+const todayLabel = document.querySelector<HTMLDivElement>('#today-label')!;
+const lastDrinkLabel = document.querySelector<HTMLDivElement>('#last-drink')!;
+const quickAddGrid = document.querySelector<HTMLDivElement>('#quick-add-grid')!;
+const reminderStatus = document.querySelector<HTMLSpanElement>('#reminder-status')!;
+const nextReminderLabel = document.querySelector<HTMLDivElement>('#next-reminder')!;
+const logList = document.querySelector<HTMLDivElement>('#log-list')!;
+const customAmountInput = document.querySelector<HTMLInputElement>('#custom-amount')!;
+const customAddBtn = document.querySelector<HTMLButtonElement>('#custom-add-btn')!;
+const removeLastBtn = document.querySelector<HTMLButtonElement>('#remove-last-btn')!;
+const resetDayBtn = document.querySelector<HTMLButtonElement>('#reset-day-btn')!;
+const dailyGoalInput = document.querySelector<HTMLInputElement>('#daily-goal')!;
+const reminderIntervalInput = document.querySelector<HTMLInputElement>('#reminder-interval')!;
+const reminderEnabledInput = document.querySelector<HTMLInputElement>('#reminder-enabled')!;
+const quickAmountInputs = [
+  document.querySelector<HTMLInputElement>('#quick-amount-1')!,
+  document.querySelector<HTMLInputElement>('#quick-amount-2')!,
+  document.querySelector<HTMLInputElement>('#quick-amount-3')!,
+  document.querySelector<HTMLInputElement>('#quick-amount-4')!,
+];
+const signInBtn = document.querySelector<HTMLButtonElement>('#sign-in-btn')!;
+const signOutBtn = document.querySelector<HTMLButtonElement>('#sign-out-btn')!;
+const syncStatusLabel = document.querySelector<HTMLSpanElement>('#sync-status')!;
+const authStatusLabel = document.querySelector<HTMLDivElement>('#auth-status')!;
+const debugStatusLabel = document.querySelector<HTMLSpanElement>('#debug-status')!;
+const requestPermissionBtn = document.querySelector<HTMLButtonElement>('#request-permission-btn')!;
+const testReminderBtn = document.querySelector<HTMLButtonElement>('#test-reminder-btn')!;
 const debugToolsFieldset = document.querySelector<HTMLElement>('#debug-tools')!;
-const focusMinutesInput = document.querySelector<HTMLInputElement>('#focus-minutes')!;
-const breakMinutesInput = document.querySelector<HTMLInputElement>('#break-minutes')!;
-const focusBumpMinsInput = document.querySelector<HTMLInputElement>('#focus-bump-mins')!;
-const focusBumpMaxInput  = document.querySelector<HTMLInputElement>('#focus-bump-max')!;
-const breakBumpMinsInput = document.querySelector<HTMLInputElement>('#break-bump-mins')!;
-const breakBumpMaxInput  = document.querySelector<HTMLInputElement>('#break-bump-max')!;
-const transitionModeSelect = document.querySelector<HTMLSelectElement>('#transition-mode')!;
-const transitionSecondsInput = document.querySelector<HTMLInputElement>('#transition-seconds')!;
-const flashAlternateInput = document.querySelector<HTMLInputElement>('#flash-alternate')!;
-const flashIntervalMsInput = document.querySelector<HTMLInputElement>('#flash-interval-ms')!;
-const flashCharAInput = document.querySelector<HTMLInputElement>('#flash-char-a')!;
-const flashCharBInput = document.querySelector<HTMLInputElement>('#flash-char-b')!;
-const flashQtyAInput = document.querySelector<HTMLInputElement>('#flash-qty-a')!;
-const flashQtyBInput = document.querySelector<HTMLInputElement>('#flash-qty-b')!;
-const alternateBlock = document.querySelector<HTMLElement>('#alternate-block')!;
-const publishStatus = document.querySelector<HTMLSpanElement>('#publish-status')!;
-const eventLog = document.querySelector<HTMLPreElement>('#event-log')!;
-const publishLog = document.querySelector<HTMLPreElement>('#publish-log')!;
-const eventLines: string[] = [];
-const DISPLAY_COLUMNS = 52;
-const browserTimerMode = document.querySelector<HTMLSpanElement>('#browser-timer-mode')!;
-const browserTimerPhase = document.querySelector<HTMLSpanElement>('#browser-timer-phase')!;
-const browserTimerTime = document.querySelector<HTMLDivElement>('#browser-timer-time')!;
-const browserTimerTask = document.querySelector<HTMLDivElement>('#browser-timer-task')!;
-const btnTimerUp = document.querySelector<HTMLButtonElement>('#btn-timer-up')!;
-const btnTimerClick = document.querySelector<HTMLButtonElement>('#btn-timer-click')!;
-const btnTimerDbl = document.querySelector<HTMLButtonElement>('#btn-timer-dbl')!;
-const btnTimerDown = document.querySelector<HTMLButtonElement>('#btn-timer-down')!;
-const todoistTokenInput = document.querySelector<HTMLInputElement>('#todoist-token')!;
-const todoistProjectIdInput = document.querySelector<HTMLInputElement>('#todoist-project-id')!;
-const todoistFetchBtn = document.querySelector<HTMLButtonElement>('#todoist-fetch-btn')!;
-const todoistStatus = document.querySelector<HTMLSpanElement>('#todoist-status')!;
-const addTaskBtn = document.querySelector<HTMLButtonElement>('#add-task-btn')!;
-const taskQueueList = document.querySelector<HTMLDivElement>('#task-queue-list')!;
-const clearTasksBtn = document.querySelector<HTMLButtonElement>('#clear-tasks-btn')!;
-const currentTaskLabel = document.querySelector<HTMLSpanElement>('#current-task-label')!;
 
-const mainPanelLeftPercent = (MAIN_PANEL_X / DISPLAY_WIDTH) * 100;
-const mainPanelWidthPercent = (MAIN_PANEL_WIDTH / DISPLAY_WIDTH) * 100;
-hudMainPreview.style.left = `${mainPanelLeftPercent}%`;
-hudMainPreview.style.width = `${mainPanelWidthPercent}%`;
+function formatReminderTime(timestamp: number | null): string {
+  if (!timestamp) return 'Next reminder: off';
+  return `Next reminder: ${new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
 
-function secondsForMode(mode: PomodoroMode): number {
-  if (mode === 'FOCUS') {
-    return Math.max(1, Math.round(state.focusMinutes * 60));
+function applyRemoteStateIfNewer(remoteState: HydrateState, sourceLabel: string): boolean {
+  const remoteTime = Date.parse(remoteState.lastModifiedAt || '');
+  const localTime = Date.parse(state.lastModifiedAt || '');
+  if (Number.isFinite(remoteTime) && Number.isFinite(localTime) && remoteTime <= localTime) {
+    return false;
   }
-  return Math.max(1, Math.round(state.breakMinutes * 60));
-}
-
-function clampInt(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
-  return Math.max(min, Math.min(max, Math.floor(value)));
-}
-
-function clampFloat(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
-  return Math.max(min, Math.min(max, value));
-}
-
-function clampAppName(value: string): string {
-  return String(value || '').trim().slice(0, MAX_APP_NAME_LENGTH);
-}
-
-function charCellWidth(char: string): number {
-  const code = (char || '#').codePointAt(0) ?? 35;
-
-  // Simulator/G2 text behaves closer to fixed cells than browser pixels.
-  // Block glyphs commonly occupy ~2 cells while ASCII takes ~1.
-  if (code >= 0x2580 && code <= 0x259f) return 2; // Block Elements
-  if (code >= 0x25a0 && code <= 0x25ff) return 2; // Geometric Shapes
-  if (code >= 0x2500 && code <= 0x257f) return 2; // Box Drawing
-  if (code >= 0xff01 && code <= 0xff60) return 2; // Full-width forms
-  return 1;
-}
-
-function estimateQtyForChar(char: string): number {
-  const width = charCellWidth((char || '#').slice(0, 1));
-  return clampInt(Math.floor(DISPLAY_COLUMNS / width), 1, 80);
-}
-
-function formatTime(totalSeconds: number): string {
-  const s = Math.max(0, Math.floor(totalSeconds));
-  const mm = String(Math.floor(s / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
-  return `${mm}:${ss}`;
-}
-
-function resetCurrentMode(): void {
-  state.remainingSeconds = secondsForMode(state.mode);
-  state.inTransition = false;
-  state.pendingMode = null;
-  state.transitionRemainingSeconds = 0;
-  state.transitionElapsedMs = 0;
-  lastTickMs = Date.now();
-}
-
-function setMode(mode: PomodoroMode): void {
-  state.mode = mode;
-  state.running = false;
-  state.bumpCount = 0;
-  resetCurrentMode();
-}
-
-function toggleRunPause(): void {
-  if (state.inTransition && state.transitionMode === 'MANUAL' && state.pendingMode) {
-    completeTransition(true);
-    return;
-  }
-  if (state.inTransition) return;
-  state.running = !state.running;
-  lastTickMs = Date.now();
-}
-
-function startTransition(nextMode: PomodoroMode): void {
-  state.inTransition = true;
-  state.pendingMode = nextMode;
-  state.running = false;
-  state.transitionElapsedMs = 0;
-
-  if (state.transitionMode === 'MANUAL') {
-    state.transitionRemainingSeconds = 0;
-  } else {
-    state.transitionRemainingSeconds = state.transitionSeconds;
-  }
-
-  lastTickMs = Date.now();
-}
-
-function completeTransition(startRunning: boolean): void {
-  if (!state.pendingMode) return;
-
-  if (state.taskReviewPending) {
-    state.taskReviewPending = false;
-    state.inTransition = false;
-    state.pendingMode = null;
-    state.transitionRemainingSeconds = 0;
-    state.transitionElapsedMs = 0;
-    state.phase = 'TASK_REVIEW';
-    state.taskReviewSelection = 0;
-    state.running = false;
-    lastTickMs = Date.now();
-    return;
-  }
-
-  state.mode = state.pendingMode;
-  state.bumpCount = 0;
-  state.pendingMode = null;
-  state.inTransition = false;
-  state.transitionRemainingSeconds = 0;
-  state.transitionElapsedMs = 0;
-  state.remainingSeconds = secondsForMode(state.mode);
-  state.running = startRunning;
-  lastTickMs = Date.now();
-  if (state.mode === 'FOCUS') {
-    state.currentTask = state.taskQueue[0] ?? null;
-    renderTaskList();
-  }
-}
-
-// ── Task helpers ────────────────────────────────────────────────────────────
-
-function truncateTask(title: string, maxLen: number): string {
-  const upper = title.toUpperCase();
-  const trunc = upper.length > maxLen ? upper.slice(0, maxLen - 1) + '\u2026' : upper;
-  return trunc.padEnd(maxLen, ' ');
-}
-
-function saveManualTasksToStorage(): void {
-  const manual = state.taskQueue.filter((t) => t.source === 'MANUAL');
-  localStorage.setItem(LS_MANUAL_TASKS, JSON.stringify(manual));
-}
-
-function renderTaskList(): void {
-  taskQueueList.innerHTML = '';
-  state.taskQueue.forEach((task, i) => {
-    const item = document.createElement('div');
-    item.className = 'task-item';
-
-    const badge = document.createElement('span');
-    badge.className = `task-badge${task.source === 'TODOIST' ? ' todoist' : ''}`;
-    badge.textContent = task.source === 'TODOIST' ? 'T' : 'M';
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'task-edit-input';
-    input.value = task.title;
-    input.placeholder = 'Task name…';
-    input.addEventListener('input', () => {
-      state.taskQueue[i].title = input.value;
-      if (state.currentTask?.id === task.id) state.currentTask.title = input.value;
-      saveManualTasksToStorage();
-      currentTaskLabel.textContent = state.currentTask ? `Active: ${state.currentTask.title}` : '';
-    });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') input.blur();
-    });
-    input.addEventListener('blur', () => void render());
-
-    const upBtn = document.createElement('button');
-    upBtn.textContent = '▲';
-    upBtn.title = 'Move up';
-    upBtn.disabled = i === 0;
-    upBtn.addEventListener('click', () => {
-      if (i > 0) {
-        [state.taskQueue[i - 1], state.taskQueue[i]] = [state.taskQueue[i], state.taskQueue[i - 1]];
-        saveManualTasksToStorage();
-        renderTaskList();
-        void render();
-      }
-    });
-
-    const downBtn = document.createElement('button');
-    downBtn.textContent = '▼';
-    downBtn.title = 'Move down';
-    downBtn.disabled = i === state.taskQueue.length - 1;
-    downBtn.addEventListener('click', () => {
-      if (i < state.taskQueue.length - 1) {
-        [state.taskQueue[i], state.taskQueue[i + 1]] = [state.taskQueue[i + 1], state.taskQueue[i]];
-        saveManualTasksToStorage();
-        renderTaskList();
-        void render();
-      }
-    });
-
-    const removeBtn = document.createElement('button');
-    removeBtn.textContent = '✕';
-    removeBtn.title = 'Remove';
-    removeBtn.addEventListener('click', () => {
-      state.taskQueue.splice(i, 1);
-      if (state.currentTask?.id === task.id) state.currentTask = state.taskQueue[0] ?? null;
-      saveManualTasksToStorage();
-      renderTaskList();
-      void render();
-    });
-
-    item.append(badge, input, upBtn, downBtn, removeBtn);
-    taskQueueList.appendChild(item);
-  });
-
-  currentTaskLabel.textContent = state.currentTask ? `Active: ${state.currentTask.title}` : '';
-}
-
-function initCollapsibles(): void {
-  document.querySelectorAll<HTMLElement>('.collapsible').forEach(el => {
-    const legend = el.querySelector(':scope > legend');
-    if (!legend) return;
-    legend.addEventListener('click', () => el.classList.toggle('collapsed'));
-  });
-}
-
-function loadTasksFromStorage(): void {
-  try {
-    const raw = localStorage.getItem(LS_MANUAL_TASKS);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Task[];
-      state.taskQueue = parsed.filter((t) => t && t.id && t.title);
-    }
-  } catch {}
-  state.todoistToken = localStorage.getItem(LS_TODOIST_TOKEN) ?? '';
-  state.todoistProjectId = localStorage.getItem(LS_TODOIST_PROJECT_ID) ?? '';
-}
-
-function dequeueNextTask(): void {
-  state.taskQueue.shift();
-  state.currentTask = state.taskQueue[0] ?? null;
-  saveManualTasksToStorage();
-  renderTaskList();
-}
-
-function markTaskDone(): void {
-  if (state.currentTask?.source === 'TODOIST' && state.currentTask.id) {
-    const taskId = state.currentTask.id;
-    fetch(`${CONTROL_URL}/todoist/tasks/${encodeURIComponent(taskId)}/close`, { method: 'POST' }).catch((err) => {
-      console.warn('[todoist] close task failed:', err);
-    });
-  }
-  dequeueNextTask();
-}
-
-
-type ReviewAction = 'done' | 'extend' | 'incomplete';
-type ReviewOption = { label: string; action: ReviewAction };
-
-function getTaskReviewOptions(): ReviewOption[] {
-  const bumpMax = state.mode === 'FOCUS' ? state.focusBumpMax : state.breakBumpMax;
-  const extMin  = state.mode === 'FOCUS' ? state.focusBumpMinutes : state.breakBumpMinutes;
-  const canExtend = bumpMax === 0 || state.bumpCount < bumpMax;
-  if (state.mode === 'FOCUS') {
-    return [
-      { label: 'DONE', action: 'done' },
-      ...(canExtend ? [{ label: `+${extMin} MIN`, action: 'extend' as ReviewAction }] : []),
-      { label: 'INCOMPLETE', action: 'incomplete' },
-    ];
-  } else {
-    return [
-      { label: 'START FOCUS', action: 'done' },
-      ...(canExtend ? [{ label: `+${extMin} BREAK`, action: 'extend' as ReviewAction }] : []),
-    ];
-  }
-}
-
-function enterTaskReview(): void {
-  const nextMode: PomodoroMode = state.mode === 'FOCUS' ? 'BREAK' : 'FOCUS';
-  if (state.transitionMode === 'AUTO') {
-    if (state.mode === 'FOCUS') markTaskDone();
-    startTransition(nextMode);
-  } else {
-    state.taskReviewPending = true;
-    state.taskReviewSelection = 0;
-    startTransition(nextMode);
-  }
-}
-
-function extendCurrentSession(minutes: number): void {
-  state.remainingSeconds = minutes * 60;
-  state.phase = 'TIMER';
-  state.running = true;
-  lastTickMs = Date.now();
-}
-
-async function fetchTodoistTasks(): Promise<void> {
-  const token = todoistTokenInput.value.trim();
-  const projectId = todoistProjectIdInput.value.trim();
-
-  if (!token) {
-    todoistStatus.textContent = 'Token required';
-    return;
-  }
-
-  // Persist credentials
-  state.todoistToken = token;
-  state.todoistProjectId = projectId;
-  localStorage.setItem(LS_TODOIST_TOKEN, token);
-  localStorage.setItem(LS_TODOIST_PROJECT_ID, projectId);
-  await fetch(`${CONTROL_URL}/todoist/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, projectId }),
-  }).catch(() => {});
-
-  todoistStatus.textContent = 'Fetching…';
-  todoistFetchBtn.disabled = true;
-
-  try {
-    const url = projectId
-      ? `${CONTROL_URL}/todoist/tasks?project_id=${encodeURIComponent(projectId)}`
-      : `${CONTROL_URL}/todoist/tasks`;
-    const response = await fetch(url, { cache: 'no-store' });
-    const body = (await response.json().catch(() => null)) as { ok?: boolean; tasks?: any[]; error?: string } | null;
-
-    if (!response.ok || !body?.ok) {
-      todoistStatus.textContent = `Error: ${body?.error ?? response.status}`;
-      return;
-    }
-
-    const incoming: Task[] = (body.tasks ?? []).map((t: any) => ({
-      id: String(t.id ?? t.task_id ?? ''),
-      title: String(t.content ?? t.title ?? ''),
-      source: 'TODOIST' as TaskSource,
-    }));
-
-    const existingIds = new Set(state.taskQueue.filter((t) => t.source === 'TODOIST').map((t) => t.id));
-    const newTasks = incoming.filter((t) => t.id && t.title && !existingIds.has(t.id));
-    state.taskQueue.push(...newTasks);
-
-    if (!state.currentTask && state.taskQueue.length > 0) {
-      state.currentTask = state.taskQueue[0];
-    }
-
-    todoistStatus.textContent = `+${newTasks.length} tasks (${state.taskQueue.length} total)`;
-    renderTaskList();
-    void render();
-  } catch (err) {
-    todoistStatus.textContent = `Error: ${String(err)}`;
-  } finally {
-    todoistFetchBtn.disabled = false;
-  }
-}
-
-// ── End task helpers ─────────────────────────────────────────────────────────
-
-function buildFullFlashText(char: string, qty: number, rows: number): string {
-  const safeChar = (char && char.length > 0 ? char : '#').slice(0, 1);
-  const safeQty = Math.max(1, Math.floor(qty));
-  const safeRows = Math.max(1, Math.floor(rows));
-  const line = safeChar.repeat(safeQty);
-  return Array.from({ length: safeRows }, () => line).join('\n');
-}
-
-function getCurrentFlashSpec(): { char: string; qty: number } {
-  if (!state.flashAlternate) {
-    return { char: state.flashCharA, qty: state.flashQtyA };
-  }
-
-  const intervalMs = Math.max(50, Math.floor(state.flashIntervalMs));
-  const phase = Math.floor(state.transitionElapsedMs / intervalMs) % 2;
-  if (phase === 0) {
-    return { char: state.flashCharA, qty: state.flashQtyA };
-  }
-  return { char: state.flashCharB, qty: state.flashQtyB };
-}
-
-function buildMainHudText(): string {
-  if (state.inTransition && state.pendingMode) {
-    // Always show flash — never show "X -> Y / CLICK to continue" text
-    const spec = getCurrentFlashSpec();
-    return buildFullFlashText(spec.char, spec.qty, FLASH_ROWS);
-  }
-
-  if (state.phase === 'TASK_REVIEW') {
-    const taskLine = state.currentTask
-      ? truncateTask(state.currentTask.title, DISPLAY_COLUMNS)
-      : (state.mode === 'BREAK' ? 'BREAK' : '(NO TASK)').padEnd(DISPLAY_COLUMNS);
-    const opts = getTaskReviewOptions();
-    const sel = Math.min(state.taskReviewSelection, opts.length - 1);
-    return [
-      taskLine,
-      ...opts.map((o, i) => `${i === sel ? '>' : ' '} ${o.label}`.padEnd(DISPLAY_COLUMNS)),
-    ].join('\n');
-  }
-
-  if (state.phase === 'TASK_CHANGE') {
-    const endLabel = `END ${state.mode}`;
-    const sel = state.taskChangeSelection;
-    return [
-      'SKIP?'.padEnd(DISPLAY_COLUMNS),
-      `${sel === 0 ? '>' : ' '} ${endLabel}`.padEnd(DISPLAY_COLUMNS),
-      `${sel === 1 ? '>' : ' '} STAY`.padEnd(DISPLAY_COLUMNS),
-      `${sel === 2 ? '>' : ' '} RESET TIME`.padEnd(DISPLAY_COLUMNS),
-    ].join('\n');
-  }
-
-  const timerLine = [
-    state.mode, ':',
-    state.running ? '\u25b6' : 'll',
-    formatTime(state.remainingSeconds),
-  ].join(' ');
-
-  const lines: string[] = [];
-  if (state.currentTask) {
-    lines.push(truncateTask(state.currentTask.title, DISPLAY_COLUMNS));
-  }
-  lines.push(timerLine);
-  if (!state.inTransition) {
-    lines.push((state.running ? 'CLICK:Pause  DBL:Change' : 'CLICK:Start  DBL:Change').padEnd(DISPLAY_COLUMNS));
-  }
-  return lines.join('\n');
-}
-
-async function pushHudToEvenHub(): Promise<void> {
-  if (!bridge || !startupCreated) return;
-
-  const mainContent = buildMainHudText();
-
-  await bridge.textContainerUpgrade(
-    new TextContainerUpgrade({
-      containerID: MAIN_CONTAINER_ID,
-      containerName: MAIN_CONTAINER_NAME,
-      contentOffset: 0,
-      contentLength: mainContent.length,
-      content: mainContent,
-    }),
-  );
-}
-
-function updateBrowserTimer(): void {
-  browserTimerMode.textContent = state.mode;
-  browserTimerTask.textContent = state.currentTask?.title ?? '';
-
-  // Auto-collapse all collapsibles once when timer first plays; never re-expand automatically
-  if (state.running && !didAutoCollapse) {
-    didAutoCollapse = true;
-    document.querySelectorAll<HTMLElement>('.collapsible').forEach(el => el.classList.add('collapsed'));
-  }
-
-  if (state.phase === 'TASK_REVIEW') {
-    const opts = getTaskReviewOptions();
-    const extMin = state.mode === 'FOCUS' ? state.focusBumpMinutes : state.breakBumpMinutes;
-    const isFocus = state.mode === 'FOCUS';
-    browserTimerTime.textContent = formatTime(state.remainingSeconds);
-    browserTimerPhase.textContent = 'review';
-
-    const doneIdx = opts.findIndex(o => o.action === 'done');
-    const extIdx  = opts.findIndex(o => o.action === 'extend');
-    const incIdx  = opts.findIndex(o => o.action === 'incomplete');
-
-    btnTimerUp.textContent = isFocus ? '✓ Done' : '▶ Start Focus';
-    btnTimerUp.disabled = doneIdx < 0;
-    btnTimerUp.className = 'timer-btn timer-btn-primary';
-    btnTimerUp.onclick = doneIdx >= 0 ? () => { state.taskReviewSelection = doneIdx; void applyAction('CLICK'); } : null;
-
-    btnTimerDown.textContent = extIdx >= 0 ? (isFocus ? `+${extMin} min` : `+${extMin} break`) : '—';
-    btnTimerDown.disabled = extIdx < 0;
-    btnTimerDown.className = 'timer-btn';
-    btnTimerDown.onclick = extIdx >= 0 ? () => { state.taskReviewSelection = extIdx; void applyAction('CLICK'); } : null;
-
-    btnTimerClick.textContent = incIdx >= 0 ? '⚐ Incomplete' : '—';
-    btnTimerClick.disabled = incIdx < 0;
-    btnTimerClick.className = 'timer-btn';
-    btnTimerClick.onclick = incIdx >= 0 ? () => { state.taskReviewSelection = incIdx; void applyAction('CLICK'); } : null;
-
-    btnTimerDbl.textContent = '—'; btnTimerDbl.disabled = true; btnTimerDbl.className = 'timer-btn';
-    btnTimerDbl.onclick = null;
-    return;
-  } else if (state.phase === 'TASK_CHANGE') {
-    const endLabel = `End ${state.mode === 'FOCUS' ? 'Focus' : 'Break'}`;
-    browserTimerTime.textContent = formatTime(state.remainingSeconds);
-    browserTimerPhase.textContent = 'Skip?';
-    btnTimerUp.textContent = endLabel;    btnTimerUp.disabled = false;    btnTimerUp.className = 'timer-btn timer-btn-primary';
-    btnTimerUp.onclick = () => { state.taskChangeSelection = 0; void applyAction('CLICK'); };
-    btnTimerClick.textContent = 'Stay';   btnTimerClick.disabled = false; btnTimerClick.className = 'timer-btn';
-    btnTimerClick.onclick = () => { state.taskChangeSelection = 1; void applyAction('CLICK'); };
-    btnTimerDbl.textContent = '—';        btnTimerDbl.disabled = true;    btnTimerDbl.className = 'timer-btn';
-    btnTimerDbl.onclick = null;
-    btnTimerDown.textContent = 'Reset';   btnTimerDown.disabled = false;  btnTimerDown.className = 'timer-btn';
-    btnTimerDown.onclick = () => { state.taskChangeSelection = 2; void applyAction('CLICK'); };
-  } else if (state.inTransition) {
-    browserTimerTime.textContent = formatTime(state.transitionRemainingSeconds);
-    browserTimerPhase.textContent = 'transitioning';
-    btnTimerUp.textContent = '—';    btnTimerUp.disabled = true;     btnTimerUp.className = 'timer-btn';    btnTimerUp.onclick = null;
-    btnTimerClick.textContent = '…'; btnTimerClick.disabled = true;  btnTimerClick.className = 'timer-btn'; btnTimerClick.onclick = null;
-    btnTimerDbl.textContent = '—';   btnTimerDbl.disabled = true;    btnTimerDbl.className = 'timer-btn';   btnTimerDbl.onclick = null;
-    btnTimerDown.textContent = '—';  btnTimerDown.disabled = true;   btnTimerDown.className = 'timer-btn';  btnTimerDown.onclick = null;
-  } else {
-    browserTimerTime.textContent = formatTime(state.remainingSeconds);
-    browserTimerPhase.textContent = state.running ? '' : 'paused';
-    btnTimerUp.textContent = '↑ Focus';    btnTimerUp.disabled = false;    btnTimerUp.className = 'timer-btn';    btnTimerUp.onclick = null;
-    btnTimerClick.textContent = state.running ? '⏸ Pause' : '▶ Start';
-    btnTimerClick.disabled = false;        btnTimerClick.className = 'timer-btn timer-btn-primary'; btnTimerClick.onclick = null;
-    btnTimerDbl.textContent = '⇄ Change';  btnTimerDbl.disabled = false;   btnTimerDbl.className = 'timer-btn';   btnTimerDbl.onclick = null;
-    btnTimerDown.textContent = '↓ Break';  btnTimerDown.disabled = false;   btnTimerDown.className = 'timer-btn';  btnTimerDown.onclick = null;
-  }
-}
-
-async function render(): Promise<void> {
-  updateBrowserTimer();
-  hudMainPreview.textContent = buildMainHudText();
-  publishStatus.textContent = state.publishStatus;
-  publishBtn.textContent = state.deployed ? 'Update App' : 'Publish App';
-  alternateBlock.classList.toggle('collapsed', !state.flashAlternate);
-
-  try {
-    await pushHudToEvenHub();
-  } catch (error) {
-    console.error('Failed to push HUD update to Even Hub:', error);
-  }
-}
-
-function tickPomodoro(): void {
-  const now = Date.now();
-  const deltaMs = now - lastTickMs;
-  if (deltaMs <= 0) {
-    return;
-  }
-
-  if (state.inTransition) {
-    lastTickMs = now;
-    state.transitionElapsedMs += deltaMs;
-    const totalMs = Math.max(1, Math.floor(state.transitionSeconds * 1000));
-    const remainingMs = Math.max(0, totalMs - state.transitionElapsedMs);
-    state.transitionRemainingSeconds = remainingMs / 1000;
-    if (remainingMs <= 0 && state.pendingMode) {
-      completeTransition(true);
-    }
-    void render();
-    return;
-  }
-
-  if (!state.running) {
-    return;
-  }
-
-  const deltaSeconds = Math.floor(deltaMs / 1000);
-  if (deltaSeconds <= 0) {
-    return;
-  }
-
-  lastTickMs += deltaSeconds * 1000;
-  state.remainingSeconds -= deltaSeconds;
-
-  while (state.remainingSeconds <= 0) {
-    enterTaskReview();
-    break;
-  }
-
-  void render();
-}
-
-async function applyAction(action: InputAction): Promise<void> {
-  // ── TASK_REVIEW: after flash, ask about 5 more mins ─────────────────────
-  if (state.phase === 'TASK_REVIEW') {
-    const opts = getTaskReviewOptions();
-    const maxSel = opts.length - 1;
-    if (action === 'UP') {
-      state.taskReviewSelection = Math.max(0, state.taskReviewSelection - 1);
-    } else if (action === 'DOWN') {
-      state.taskReviewSelection = Math.min(maxSel, state.taskReviewSelection + 1);
-    } else if (action === 'CLICK') {
-      const chosen = opts[Math.min(state.taskReviewSelection, maxSel)];
-      state.taskReviewSelection = 0;
-      if (chosen.action === 'done') {
-        if (state.mode === 'FOCUS') markTaskDone();
-        const nextMode: PomodoroMode = state.mode === 'FOCUS' ? 'BREAK' : 'FOCUS';
-        setMode(nextMode);
-        if (nextMode === 'FOCUS') { state.currentTask = state.taskQueue[0] ?? null; renderTaskList(); }
-        state.running = true; state.phase = 'TIMER'; lastTickMs = Date.now();
-      } else if (chosen.action === 'extend') {
-        state.bumpCount++;
-        extendCurrentSession(state.mode === 'FOCUS' ? state.focusBumpMinutes : state.breakBumpMinutes);
-      } else {
-        // incomplete — don't mark done, just go to break
-        setMode('BREAK');
-        state.running = true; state.phase = 'TIMER'; lastTickMs = Date.now();
-      }
-    }
-    await render();
-    return;
-  }
-
-  // ── TASK_CHANGE: 3-option cursor menu ───────────────────────────────────
-  if (state.phase === 'TASK_CHANGE') {
-    if (action === 'UP') {
-      state.taskChangeSelection = Math.max(0, state.taskChangeSelection - 1);
-    } else if (action === 'DOWN') {
-      state.taskChangeSelection = Math.min(2, state.taskChangeSelection + 1);
-    } else if (action === 'CLICK') {
-      const sel = state.taskChangeSelection;
-      state.taskChangeSelection = 0;
-      if (sel === 0) {
-        // End current session — no flash, no review, just switch modes
-        if (state.mode === 'FOCUS') {
-          markTaskDone();
-          setMode('BREAK');
-          state.phase = 'TIMER';
-          state.running = true;
-          lastTickMs = Date.now();
-        } else {
-          setMode('FOCUS');
-          state.phase = 'TIMER';
-          state.currentTask = state.taskQueue[0] ?? null;
-          renderTaskList();
-          state.running = true;
-          lastTickMs = Date.now();
-        }
-      } else if (sel === 1) {
-        // Stay — resume
-        state.phase = 'TIMER';
-        state.running = true;
-        lastTickMs = Date.now();
-      } else {
-        // Reset time — reset duration, auto-play
-        state.remainingSeconds = secondsForMode(state.mode);
-        state.phase = 'TIMER';
-        state.running = true;
-        lastTickMs = Date.now();
-      }
-    }
-    await render();
-    return;
-  }
-
-  // ── Normal TIMER phase ───────────────────────────────────────────────────
-  if (action === 'CLICK') {
-    toggleRunPause();
-  } else if (action === 'DOUBLE_CLICK') {
-    // Always enter change page — never reset from here
-    state.running = false;
-    state.phase = 'TASK_CHANGE';
-    state.taskChangeSelection = 0;
-  } else if (action === 'UP') {
-    setMode('FOCUS');
-  } else if (action === 'DOWN') {
-    setMode('BREAK');
-  }
-
-  await render();
-}
-
-function mapEventTypeToAction(eventType: unknown): InputAction | null {
-  if (eventType === undefined || eventType === null) return null;
-
-  const normalized = OsEventTypeList.fromJson?.(eventType);
-  if (normalized === OsEventTypeList.CLICK_EVENT) return 'CLICK';
-  if (normalized === OsEventTypeList.SCROLL_TOP_EVENT) return 'UP';
-  if (normalized === OsEventTypeList.SCROLL_BOTTOM_EVENT) return 'DOWN';
-  if (normalized === OsEventTypeList.DOUBLE_CLICK_EVENT) return 'DOUBLE_CLICK';
-
-  if (eventType === OsEventTypeList.CLICK_EVENT || eventType === 0) return 'CLICK';
-  if (eventType === OsEventTypeList.SCROLL_TOP_EVENT || eventType === 1) return 'UP';
-  if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT || eventType === 2) return 'DOWN';
-  if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT || eventType === 3) return 'DOUBLE_CLICK';
-
-  const text = String(eventType).toUpperCase();
-  if (text.includes('DOUBLE') && text.includes('CLICK')) return 'DOUBLE_CLICK';
-  if (text.includes('DOUBLE') && text.includes('TAP')) return 'DOUBLE_CLICK';
-  if (text.includes('SCROLL_TOP') || text === 'UP' || text.includes('SWIPE_UP')) return 'UP';
-  if (text.includes('SCROLL_BOTTOM') || text === 'DOWN' || text.includes('SWIPE_DOWN')) return 'DOWN';
-  if (text.includes('SINGLE') && text.includes('CLICK')) return 'CLICK';
-  if (text.includes('SINGLE') && text.includes('TAP')) return 'CLICK';
-  if (text.includes('TAP_EVENT') || text === 'TAP') return 'CLICK';
-  if (text === 'CLICK' || text.includes('CLICK_EVENT')) return 'CLICK';
-
-  return null;
-}
-
-function extractEventType(event: any): unknown {
-  return (
-    event?.listEvent?.eventType ??
-    event?.textEvent?.eventType ??
-    event?.sysEvent?.eventType ??
-    event?.listEvent?.eventName ??
-    event?.textEvent?.eventName ??
-    event?.sysEvent?.eventName ??
-    event?.listEvent?.type ??
-    event?.textEvent?.type ??
-    event?.sysEvent?.type ??
-    event?.eventType ??
-    event?.type ??
-    event?.name
-  );
-}
-
-function appendEventLog(line: string): void {
-  eventLines.push(line);
-  while (eventLines.length > 8) {
-    eventLines.shift();
-  }
-  eventLog.textContent = eventLines.join('\n');
-}
-
-function shouldTreatEmptySysEventAsClick(event: any): boolean {
-  const explicitType = extractEventType(event);
-  if (mapEventTypeToAction(explicitType)) return false;
-
-  const now = Date.now();
-  if (lastResolvedAction === 'DOUBLE_CLICK' && now - lastResolvedActionAt < 350) return false;
+  Object.assign(state, remoteState);
+  saveHydrateState(state);
+  syncStatus = `Pulled latest changes from ${sourceLabel}`;
   return true;
 }
 
-function isDuplicateEvent(event: any, eventLabel: string): boolean {
-  const signature = JSON.stringify({
-    listEvent: event?.listEvent ?? null,
-    textEvent: event?.textEvent ?? null,
-    sysEvent: event?.sysEvent ?? null,
-    eventType: event?.eventType ?? null,
-    type: event?.type ?? null,
-  });
-
-  const now = Date.now();
-  if (eventLabel === lastEventLabel && signature === lastEventSignature && now - lastEventAt < 140) {
-    return true;
-  }
-
-  lastEventLabel = eventLabel;
-  lastEventSignature = signature;
-  lastEventAt = now;
-  return false;
-}
-
-async function createStartupPage(): Promise<void> {
-  if (!bridge) return;
-
-  const mainContent = buildMainHudText();
-  const containerPayload = {
-    containerTotalNum: 1,
-    textObject: [
-      new TextContainerProperty({
-        xPosition: MAIN_PANEL_X,
-        yPosition: 0,
-        width: MAIN_PANEL_WIDTH,
-        height: 288,
-        containerID: MAIN_CONTAINER_ID,
-        containerName: MAIN_CONTAINER_NAME,
-        content: mainContent,
-        isEventCapture: 1,
-      }),
-    ],
-  };
-
-  const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(containerPayload));
-  startupCreated = result === 0;
-  if (startupCreated) {
-    return;
-  }
-
-  console.warn('createStartUpPageContainer failed with code:', result, 'trying rebuildPageContainer...');
-  const rebuildOk = await bridge.rebuildPageContainer(new RebuildPageContainer(containerPayload));
-  startupCreated = !!rebuildOk;
-  if (!startupCreated) {
-    console.warn('rebuildPageContainer also failed');
-  }
-}
-
-async function publishApp(): Promise<void> {
-  if (state.publishStatus === 'RUNNING') {
-    publishLog.textContent = 'Publish is already running. Please wait...';
+async function flushCloudPush(): Promise<void> {
+  if (!currentUser || pushRunning || !pushQueued) return;
+  pushRunning = true;
+  pushQueued = false;
+  try {
+    await pushRemoteState(currentUser.uid, state, 'phone');
+    syncStatus = `Synced at ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
+  } catch (error) {
+    syncStatus = `Cloud push failed: ${String(error)}`;
+    pushQueued = true;
+  } finally {
+    pushRunning = false;
     await render();
+  }
+}
+
+function queueCloudPush(reason: string): void {
+  if (!currentUser) {
+    syncStatus = `${reason}. Sign in to sync`;
+    void render();
     return;
   }
+  pushQueued = true;
+  syncStatus = `${reason}. Sync queued`;
+  void flushCloudPush();
+}
 
-  const configResponse = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
-  const configBody = (await configResponse?.json().catch(() => null)) as
-    | { config?: { appName?: string; github?: { repo?: string } } }
-    | null;
-
-  const savedRepoName = (configBody?.config?.github?.repo ?? '').trim();
-  const defaultAppName = clampAppName(savedRepoName || configBody?.config?.appName || 'even-g2-pomodoro');
-  let appName = defaultAppName;
-
-  if (!savedRepoName) {
-    const appNameInput = window.prompt(`App name (max ${MAX_APP_NAME_LENGTH} chars):`, defaultAppName);
-    appName = clampAppName(appNameInput ?? '');
-    if (!appName) {
-      publishLog.textContent = 'Publish cancelled: app name is required.';
+async function pullRemoteState(reason: 'startup' | 'poll'): Promise<void> {
+  if (!currentUser) return;
+  try {
+    const remote = await fetchRemoteState(currentUser.uid);
+    if (!remote) {
+      if (reason === 'startup') {
+        syncStatus = 'Signed in. Waiting for first synced change';
+      }
       await render();
       return;
     }
-  }
-
-  state.publishStatus = 'RUNNING';
-  publishBtn.disabled = true;
-  ehpkBtn.disabled = true;
-  publishLog.textContent = `Publishing "${appName}"...`;
-  await render();
-
-  try {
-    let response = await fetch(`${CONTROL_URL}/publish-app`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appName }),
-    });
-
-    let body = (await response.json().catch(() => null)) as
-      | { error?: string; logs?: string; code?: string; publishUrl?: string }
-      | null;
-
-    if (!response.ok && (body?.code === 'PAT_REQUIRED' || body?.code === 'INVALID_PAT')) {
-      const promptText =
-        body?.code === 'INVALID_PAT'
-          ? 'Saved PAT is invalid. Paste a new GitHub PAT:'
-          : 'GitHub PAT required. Paste PAT:';
-      const pat = window.prompt(promptText);
-      if (!pat || !pat.trim()) {
-        throw new Error('Publish cancelled: PAT is required.');
-      }
-      response = await fetch(`${CONTROL_URL}/publish-app`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appName, pat: pat.trim() }),
-      });
-      body = (await response.json().catch(() => null)) as
-        | { error?: string; logs?: string; publishUrl?: string }
-        | null;
+    lastRemoteSeenAt = remote.clientUpdatedAt;
+    if (applyRemoteStateIfNewer(remote.state, remote.source)) {
+      await scheduleReminder();
     }
-
-    if (!response.ok) {
-      if (response.status === 409) {
-        state.publishStatus = 'RUNNING';
-        publishLog.textContent = 'Publish already running. Please wait for it to complete.';
-        await render();
-        return;
-      }
-      throw new Error(body?.error ?? `HTTP ${response.status}`);
-    }
-
-    state.publishStatus = 'DONE';
-    state.deployed = true;
-    publishLog.textContent = `${body?.logs ?? 'Publish complete.'}\n\nPublished URL:\n${body?.publishUrl ?? 'unknown'}`;
   } catch (error) {
-    state.publishStatus = 'FAILED';
-    publishLog.textContent = `Error: ${String(error)}`;
-  } finally {
-    publishBtn.disabled = false;
-    ehpkBtn.disabled = false;
-    await render();
+    syncStatus = `Cloud fetch failed: ${String(error)}`;
+  }
+  await render();
+}
+
+function stopCloudSync(): void {
+  syncUnsubscribe?.();
+  syncUnsubscribe = null;
+  if (syncPollTimer !== null) {
+    window.clearInterval(syncPollTimer);
+    syncPollTimer = null;
   }
 }
 
-async function buildEhpk(): Promise<void> {
-  if (state.publishStatus === 'RUNNING' || state.publishStatus === 'REBOOTING' || state.publishStatus === 'PACKING') {
-    publishLog.textContent = 'Another operation is in progress. Please wait...';
+async function startCloudSync(): Promise<void> {
+  stopCloudSync();
+  if (!currentUser) {
+    syncStatus = 'Sign in to sync with glasses';
     await render();
     return;
   }
 
-  const configResponse = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' }).catch(() => null);
-  const configBody = (await configResponse?.json().catch(() => null)) as { config?: { appName?: string } } | null;
-  const defaultAppName = clampAppName((configBody?.config?.appName ?? 'even-g2-app').trim() || 'even-g2-app');
+  await pullRemoteState('startup');
 
-  const appNameInput = window.prompt(`App name for .ehpk package (max ${MAX_APP_NAME_LENGTH} chars):`, defaultAppName);
-  const appName = clampAppName(appNameInput ?? '');
-  if (!appName) {
-    publishLog.textContent = 'Build cancelled: app name is required.';
-    await render();
-    return;
-  }
-
-  state.publishStatus = 'PACKING';
-  publishBtn.disabled = true;
-  ehpkBtn.disabled = true;
-  publishLog.textContent = `Building .ehpk for "${appName}"...`;
-  await render();
-
-  try {
-    const response = await fetch(`${CONTROL_URL}/build-ehpk`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appName }),
-    });
-
-    const body = (await response.json().catch(() => null)) as
-      | { error?: string; logs?: string; outputPath?: string }
-      | null;
-
-    if (!response.ok) {
-      if (response.status === 409) {
-        state.publishStatus = 'PACKING';
-        publishLog.textContent = 'EHPK build already running. Please wait for it to finish.';
-        await render();
-        return;
-      }
-      throw new Error(body?.error ?? `HTTP ${response.status}`);
+  syncUnsubscribe = subscribeToRemoteState(currentUser.uid, (remote) => {
+    if (!remote || remote.clientUpdatedAt === lastRemoteSeenAt) return;
+    lastRemoteSeenAt = remote.clientUpdatedAt;
+    if (applyRemoteStateIfNewer(remote.state, remote.source)) {
+      void scheduleReminder().then(render);
     }
+  });
 
-    state.publishStatus = 'DONE';
-    publishLog.textContent = `${body?.logs ?? 'EHPK build complete.'}\n\nOutput:\n${body?.outputPath ?? 'unknown'}`;
-  } catch (error) {
-    state.publishStatus = 'FAILED';
-    publishLog.textContent = `Error: ${String(error)}`;
-  } finally {
-    publishBtn.disabled = false;
-    ehpkBtn.disabled = false;
-    await render();
+  syncPollTimer = window.setInterval(() => {
+    void pullRemoteState('poll');
+  }, 5000);
+
+  if (state.lastModifiedAt && Date.parse(state.lastModifiedAt) > Date.parse(lastRemoteSeenAt || '1970-01-01T00:00:00.000Z')) {
+    queueCloudPush('Local state is newer');
   }
+}
+
+function renderLog(): void {
+  if (state.entries.length === 0) {
+    logList.innerHTML = '<div class="empty-state">No entries yet. Add water from the phone app and it will sync to the glasses app automatically.</div>';
+    return;
+  }
+
+  logList.innerHTML = '';
+  [...state.entries].reverse().forEach((entry) => {
+    const row = document.createElement('div');
+    row.className = 'log-item';
+    row.innerHTML = `
+      <span class="log-line">
+        <span class="log-amount">${entry.ml} ml</span>
+        <span class="log-meta">${entry.label}</span>
+        <span class="log-time">${entry.time}</span>
+      </span>
+      <button type="button" class="log-delete">Delete</button>
+    `;
+    row.querySelector('button')?.addEventListener('click', () => {
+      removeEntry(state, entry.id);
+      touchState(state);
+      saveHydrateState(state);
+      queueCloudPush('Deleted entry on phone');
+      void scheduleReminder().then(render);
+    });
+    logList.appendChild(row);
+  });
+}
+
+function renderQuickAddButtons(): void {
+  quickAddGrid.innerHTML = '';
+  state.quickAmounts.forEach((amount, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `quick-add-btn${index === state.selectedQuickIndex ? ' selected' : ''}`;
+    button.innerHTML = `<span class="quick-amount">${amount}</span><span class="quick-unit">ml</span>`;
+    button.addEventListener('click', () => {
+      state.selectedQuickIndex = index;
+      addEntry(state, amount, `Quick ${index + 1}`);
+      touchState(state);
+      saveHydrateState(state);
+      queueCloudPush(`Added ${amount} ml on phone`);
+      void scheduleReminder().then(render);
+    });
+    quickAddGrid.appendChild(button);
+  });
+}
+
+async function ensureNotificationPermission(requestIfNeeded: boolean): Promise<boolean> {
+  if (isAndroidApp) {
+    const current = await LocalNotifications.checkPermissions();
+    if (current.display === 'granted') return true;
+    if (!requestIfNeeded) return false;
+
+    const requested = await LocalNotifications.requestPermissions();
+    if (requested.display !== 'granted') return false;
+
+    await LocalNotifications.createChannel({
+      id: NOTIFICATION_CHANNEL_ID,
+      name: 'Hydrate Reminders',
+      description: 'Hydration reminders from the Android companion app',
+      importance: 4,
+      vibration: true,
+    });
+    return true;
+  }
+
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') return true;
+  if (!requestIfNeeded) return false;
+
+  return (await Notification.requestPermission()) === 'granted';
+}
+
+async function cancelScheduledReminder(): Promise<void> {
+  if (isAndroidApp) {
+    await LocalNotifications.cancel({ notifications: [{ id: NOTIFICATION_ID }] });
+    return;
+  }
+  if (reminderTimer !== null) {
+    window.clearTimeout(reminderTimer);
+    reminderTimer = null;
+  }
+}
+
+async function scheduleReminder(): Promise<void> {
+  await cancelScheduledReminder();
+  if (!state.reminderEnabled) return;
+
+  const allowed = await ensureNotificationPermission(false);
+  if (!allowed) {
+    debugStatus = 'Need notification permission';
+    return;
+  }
+
+  const nextReminderAt = Date.now() + state.reminderIntervalMinutes * 60 * 1000;
+  if (isAndroidApp) {
+    await LocalNotifications.schedule({
+      notifications: [{
+        id: NOTIFICATION_ID,
+        title: 'Hydrate',
+        body: `Time to drink water. You are at ${state.totalMl} of ${state.dailyGoalMl} ml.`,
+        channelId: NOTIFICATION_CHANNEL_ID,
+        schedule: { at: new Date(nextReminderAt), allowWhileIdle: true },
+      }],
+    });
+    return;
+  }
+
+  reminderTimer = window.setTimeout(() => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      void new Notification('Hydrate', { body: `Time to drink water. You are at ${state.totalMl} of ${state.dailyGoalMl} ml.` });
+    }
+    void scheduleReminder().then(render);
+  }, state.reminderIntervalMinutes * 60 * 1000);
+}
+
+async function sendTestReminder(): Promise<void> {
+  const allowed = await ensureNotificationPermission(true);
+  if (!allowed) {
+    debugStatus = 'Notifications denied';
+    await render();
+    return;
+  }
+
+  if (isAndroidApp) {
+    await LocalNotifications.schedule({
+      notifications: [{
+        id: NOTIFICATION_ID + 1,
+        title: 'Hydrate',
+        body: 'Test reminder from the Android companion app.',
+        channelId: NOTIFICATION_CHANNEL_ID,
+        schedule: { at: new Date(Date.now() + 1500), allowWhileIdle: true },
+      }],
+    });
+  } else {
+    void new Notification('Hydrate', { body: 'Test reminder from the Android companion app.' });
+  }
+
+  debugStatus = 'Test reminder sent';
+  await render();
+}
+
+async function render(): Promise<void> {
+  totalMlValue.textContent = String(state.totalMl);
+  goalCopy.textContent = `Goal ${state.dailyGoalMl} ml`;
+  progressBar.style.width = `${progressPercent(state)}%`;
+  progressCopy.textContent = `${progressPercent(state)}% complete`;
+  todayLabel.textContent = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  lastDrinkLabel.textContent = state.lastDrinkTime;
+  reminderStatus.textContent = state.reminderEnabled ? `Reminders ${state.reminderIntervalMinutes}m` : 'Reminders Off';
+  nextReminderLabel.textContent = formatReminderTime(state.reminderEnabled ? Date.now() + state.reminderIntervalMinutes * 60 * 1000 : null);
+  dailyGoalInput.value = String(state.dailyGoalMl);
+  reminderIntervalInput.value = String(state.reminderIntervalMinutes);
+  reminderEnabledInput.checked = state.reminderEnabled;
+  customAmountInput.value = String(state.customAmountMl);
+  quickAmountInputs.forEach((input, index) => { input.value = String(state.quickAmounts[index]); });
+  authStatusLabel.textContent = authStatus;
+  syncStatusLabel.textContent = syncStatus;
+  debugStatusLabel.textContent = debugStatus;
+  signInBtn.textContent = currentUser ? 'Signed In' : 'Sign In With Google';
+  signInBtn.disabled = !!currentUser || !isCloudSyncConfigured();
+  signOutBtn.disabled = !currentUser;
+  debugToolsFieldset.style.display = debugToolsVisible ? '' : 'none';
+  renderQuickAddButtons();
+  renderLog();
+}
+
+function bindSettings(): void {
+  dailyGoalInput.addEventListener('change', () => {
+    state.dailyGoalMl = clampInt(Number(dailyGoalInput.value), 500, 6000);
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Goal updated on phone');
+    void scheduleReminder().then(render);
+  });
+  reminderIntervalInput.addEventListener('change', () => {
+    state.reminderIntervalMinutes = clampInt(Number(reminderIntervalInput.value), 1, 240);
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Reminder interval updated');
+    void scheduleReminder().then(render);
+  });
+  reminderEnabledInput.addEventListener('change', () => {
+    state.reminderEnabled = reminderEnabledInput.checked;
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Reminder toggle updated');
+    void scheduleReminder().then(render);
+  });
+  quickAmountInputs.forEach((input, index) => input.addEventListener('change', () => {
+    state.quickAmounts[index] = clampInt(Number(input.value), 50, 2000);
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Quick add presets updated');
+    void render();
+  }));
+  customAmountInput.addEventListener('change', () => {
+    state.customAmountMl = clampInt(Number(customAmountInput.value), 1, 2000);
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Custom amount updated');
+  });
+}
+
+function initCollapsibles(): void {
+  document.querySelectorAll<HTMLElement>('.collapsible > legend').forEach((legend) => {
+    legend.addEventListener('click', () => legend.parentElement?.classList.toggle('collapsed'));
+  });
 }
 
 function setKeyboardFallback(): void {
@@ -1241,243 +507,110 @@ function setKeyboardFallback(): void {
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'd') {
       event.preventDefault();
       debugToolsVisible = !debugToolsVisible;
-      debugToolsFieldset.style.display = debugToolsVisible ? '' : 'none';
-      console.log(`[debug-tools] ${debugToolsVisible ? 'shown' : 'hidden'} (${DEV_TOOLS_TOGGLE_SHORTCUT})`);
+      void render();
       return;
     }
-    if (event.key === 'Enter') return void applyAction('CLICK');
-    if (event.key.toLowerCase() === 'd') return void applyAction('DOUBLE_CLICK');
-    if (event.key === 'ArrowUp') return void applyAction('UP');
-    if (event.key === 'ArrowDown') return void applyAction('DOWN');
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (event.key === 'Enter') return void customAddBtn.click();
+    if (event.key === 'ArrowUp') {
+      state.selectedQuickIndex = findNextQuickAmountIndex(state, 1);
+      saveHydrateState(state);
+      return void render();
+    }
+    if (event.key === 'ArrowDown') {
+      state.selectedQuickIndex = findNextQuickAmountIndex(state, -1);
+      saveHydrateState(state);
+      return void render();
+    }
   });
 }
 
+async function initAndroidBehavior(): Promise<void> {
+  if (!isAndroidApp) return;
+  await CapacitorApp.toggleBackButtonHandler({ enabled: false });
+  await CapacitorApp.addListener('backButton', ({ canGoBack }) => {
+    if (canGoBack) {
+      window.history.back();
+      return;
+    }
+    void CapacitorApp.minimizeApp();
+  });
+  await ensureNotificationPermission(false);
+}
+
 async function init(): Promise<void> {
-  loadTasksFromStorage();
   initCollapsibles();
-
   setKeyboardFallback();
-  publishBtn.addEventListener('click', () => void publishApp());
-  ehpkBtn.addEventListener('click', () => void buildEhpk());
+  bindSettings();
 
-  // Task UI wiring
-  todoistTokenInput.value = state.todoistToken;
-  todoistProjectIdInput.value = state.todoistProjectId;
-
-  todoistFetchBtn.addEventListener('click', () => void fetchTodoistTasks());
-
-  addTaskBtn.addEventListener('click', () => {
-    const task: Task = { id: crypto.randomUUID(), title: '', source: 'MANUAL' };
-    state.taskQueue.push(task);
-    if (!state.currentTask) state.currentTask = task;
-    saveManualTasksToStorage();
-    renderTaskList();
-    // Focus the newly added task's edit input
-    const inputs = taskQueueList.querySelectorAll<HTMLInputElement>('.task-edit-input');
-    inputs[inputs.length - 1]?.focus();
-    void render();
+  customAddBtn.addEventListener('click', () => {
+    state.customAmountMl = clampInt(Number(customAmountInput.value), 1, 2000);
+    addEntry(state, state.customAmountMl, 'Custom');
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Added custom entry in phone app');
+    void scheduleReminder().then(render);
   });
-
-  clearTasksBtn.addEventListener('click', () => {
-    state.taskQueue = [];
-    state.currentTask = null;
-    saveManualTasksToStorage();
-    renderTaskList();
-    void render();
+  removeLastBtn.addEventListener('click', () => {
+    undoEntry(state);
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Removed last entry in phone app');
+    void scheduleReminder().then(render);
   });
-
-  renderTaskList();
-
-  // Browser timer buttons
-  btnTimerUp.addEventListener('click',    () => void applyAction('UP'));
-  btnTimerClick.addEventListener('click', () => void applyAction('CLICK'));
-  btnTimerDbl.addEventListener('click',   () => void applyAction('DOUBLE_CLICK'));
-  btnTimerDown.addEventListener('click',  () => void applyAction('DOWN'));
-
-
-
-  transitionModeSelect.value = state.transitionMode;
-  focusMinutesInput.value = String(state.focusMinutes);
-  breakMinutesInput.value = String(state.breakMinutes);
-  focusBumpMinsInput.value = String(state.focusBumpMinutes);
-  focusBumpMaxInput.value  = String(state.focusBumpMax);
-  breakBumpMinsInput.value = String(state.breakBumpMinutes);
-  breakBumpMaxInput.value  = String(state.breakBumpMax);
-  transitionSecondsInput.value = String(state.transitionSeconds);
-  flashAlternateInput.checked = state.flashAlternate;
-  flashIntervalMsInput.value = String(state.flashIntervalMs);
-  flashCharAInput.value = state.flashCharA;
-  flashCharBInput.value = state.flashCharB;
-  flashQtyAInput.value = String(state.flashQtyA);
-  flashQtyBInput.value = String(state.flashQtyB);
-
-  const onFocusDurationChange = () => {
-    state.focusMinutes = clampFloat(Number(focusMinutesInput.value), 0, 180);
-    focusMinutesInput.value = String(state.focusMinutes);
-    if (!state.running && !state.inTransition && state.mode === 'FOCUS') {
-      state.remainingSeconds = secondsForMode('FOCUS');
-    }
-    void render();
-  };
-
-  const onBreakDurationChange = () => {
-    state.breakMinutes = clampFloat(Number(breakMinutesInput.value), 0, 180);
-    breakMinutesInput.value = String(state.breakMinutes);
-    if (!state.running && !state.inTransition && state.mode === 'BREAK') {
-      state.remainingSeconds = secondsForMode('BREAK');
-    }
-    void render();
-  };
-
-  focusMinutesInput.addEventListener('change', onFocusDurationChange);
-  breakMinutesInput.addEventListener('change', onBreakDurationChange);
-
-  focusBumpMinsInput.addEventListener('change', () => {
-    state.focusBumpMinutes = clampInt(Number(focusBumpMinsInput.value), 1, 60);
-    focusBumpMinsInput.value = String(state.focusBumpMinutes);
-    void render();
+  resetDayBtn.addEventListener('click', () => {
+    if (!window.confirm('Reset today\'s hydration log?')) return;
+    state.totalMl = 0;
+    state.entries = [];
+    state.lastDrinkTime = 'No drinks yet';
+    touchState(state);
+    saveHydrateState(state);
+    queueCloudPush('Day reset in phone app');
+    void scheduleReminder().then(render);
   });
-  focusBumpMaxInput.addEventListener('change', () => {
-    state.focusBumpMax = clampInt(Number(focusBumpMaxInput.value), 0, 20);
-    focusBumpMaxInput.value = String(state.focusBumpMax);
-    void render();
+  signInBtn.addEventListener('click', () => {
+    void signInWithGoogle().catch((error) => {
+      authStatus = `Google sign-in failed: ${String(error)}`;
+      void render();
+    });
   });
-  breakBumpMinsInput.addEventListener('change', () => {
-    state.breakBumpMinutes = clampInt(Number(breakBumpMinsInput.value), 1, 60);
-    breakBumpMinsInput.value = String(state.breakBumpMinutes);
-    void render();
+  signOutBtn.addEventListener('click', () => {
+    void signOutFromCloud().catch((error) => {
+      authStatus = `Sign out failed: ${String(error)}`;
+      void render();
+    });
   });
-  breakBumpMaxInput.addEventListener('change', () => {
-    state.breakBumpMax = clampInt(Number(breakBumpMaxInput.value), 0, 20);
-    breakBumpMaxInput.value = String(state.breakBumpMax);
-    void render();
+  requestPermissionBtn.addEventListener('click', () => {
+    void ensureNotificationPermission(true).then((allowed) => {
+      debugStatus = allowed ? 'Notifications enabled' : 'Notifications denied';
+      return render();
+    });
   });
+  testReminderBtn.addEventListener('click', () => void sendTestReminder());
 
-  transitionModeSelect.addEventListener('change', () => {
-    state.transitionMode = transitionModeSelect.value === 'MANUAL' ? 'MANUAL' : 'AUTO';
-    if (state.inTransition && state.transitionMode === 'AUTO' && state.transitionRemainingSeconds <= 0) {
-      state.transitionRemainingSeconds = state.transitionSeconds;
-      state.transitionElapsedMs = 0;
-      lastTickMs = Date.now();
-    }
-    void render();
-  });
+  await initAndroidBehavior();
 
-  transitionSecondsInput.addEventListener('change', () => {
-    const next = Math.max(1, Math.min(300, Number(transitionSecondsInput.value) || TRANSITION_SECONDS));
-    state.transitionSeconds = next;
-    transitionSecondsInput.value = String(next);
-    void render();
-  });
-
-  flashAlternateInput.addEventListener('change', () => {
-    state.flashAlternate = flashAlternateInput.checked;
-    void render();
-  });
-
-  flashIntervalMsInput.addEventListener('change', () => {
-    const next = Math.max(50, Math.min(10000, Number(flashIntervalMsInput.value) || 250));
-    state.flashIntervalMs = next;
-    flashIntervalMsInput.value = String(next);
-    void render();
-  });
-
-  flashCharAInput.addEventListener('change', () => {
-    state.flashCharA = (flashCharAInput.value || '#').slice(0, 1);
-    flashCharAInput.value = state.flashCharA;
-    state.flashQtyA = estimateQtyForChar(state.flashCharA);
-    flashQtyAInput.value = String(state.flashQtyA);
-    void render();
-  });
-
-  flashCharBInput.addEventListener('change', () => {
-    state.flashCharB = (flashCharBInput.value || '#').slice(0, 1);
-    flashCharBInput.value = state.flashCharB;
-    state.flashQtyB = estimateQtyForChar(state.flashCharB);
-    flashQtyBInput.value = String(state.flashQtyB);
-    void render();
-  });
-
-  flashQtyAInput.addEventListener('change', () => {
-    const next = Math.max(1, Math.min(80, Number(flashQtyAInput.value) || 26));
-    state.flashQtyA = next;
-    flashQtyAInput.value = String(next);
-    void render();
-  });
-
-  flashQtyBInput.addEventListener('change', () => {
-    const next = Math.max(1, Math.min(80, Number(flashQtyBInput.value) || 26));
-    state.flashQtyB = next;
-    flashQtyBInput.value = String(next);
-    void render();
-  });
-
-  window.setInterval(tickPomodoro, TICK_INTERVAL_MS);
-
-  try {
-    const health = await fetch(`${CONTROL_URL}/health`, { cache: 'no-store' });
-    const info = (await health.json().catch(() => null)) as { capabilities?: string[]; version?: string } | null;
-    if (!health.ok || !info?.capabilities?.includes(REQUIRED_CONTROL_CAPABILITY)) {
-      publishLog.textContent = 'Control server is outdated. Run Run-Even-Sim.cmd to refresh local services.';
-    } else {
-      publishLog.textContent = `Control server ready (${info.version ?? 'unknown'})`;
-    }
-  } catch {
-    publishLog.textContent = 'Control server not reachable. Run Run-Even-Sim.cmd.';
+  const bootstrap = await bootstrapCloudSync();
+  if (!bootstrap.configured) {
+    authStatus = 'Firebase env vars are missing';
+    syncStatus = 'Auto sync disabled until Firebase is configured';
+  } else {
+    currentUser = bootstrap.user;
+    authStatus = currentUser?.email || currentUser?.displayName || 'Ready to sign in';
+    listenForUserChange((user) => {
+      currentUser = user;
+      authStatus = user?.email || user?.displayName || 'Signed out';
+      void startCloudSync();
+      void render();
+    });
   }
 
-  try {
-    const response = await fetch(`${CONTROL_URL}/config`, { cache: 'no-store' });
-    const body = (await response.json().catch(() => null)) as { config?: { git?: { deployed?: boolean } } } | null;
-    state.deployed = !!body?.config?.git?.deployed;
-  } catch {}
-
-  try {
-    bridge = await Promise.race([
-      waitForEvenAppBridge(),
-      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Even bridge timeout')), 5000)),
-    ]);
-
-    await createStartupPage();
-    const handleHubEvent = (event: any) => {
-      const eventType = extractEventType(event);
-      let action = mapEventTypeToAction(eventType);
-
-      if (!action && event?.textEvent && !event?.listEvent && !event?.sysEvent) {
-        action = 'CLICK';
-      }
-
-      if (!action && shouldTreatEmptySysEventAsClick(event)) {
-        action = 'CLICK';
-      }
-
-      const eventLabel = action ?? 'NONE';
-      if (isDuplicateEvent(event, eventLabel)) {
-        return;
-      }
-      appendEventLog(`${new Date().toLocaleTimeString()}  ${eventLabel}`);
-
-      if (action) {
-        lastResolvedAction = action;
-        lastResolvedActionAt = Date.now();
-        console.log('[hub-event]', { action, eventType, event });
-        void applyAction(action);
-      }
-    };
-
-    bridge.onEvenHubEvent((event) => {
-      handleHubEvent(event);
-    });
-
-    window.addEventListener('evenHubEvent', (event: Event) => {
-      const detail = (event as CustomEvent).detail;
-      handleHubEvent(detail);
-    });
-  } catch (error) {
-    console.warn('Even bridge not ready, using browser fallback mode:', error);
-  }
-
+  await scheduleReminder();
   await render();
+
+  if (currentUser) {
+    await startCloudSync();
+  }
 }
 
 void init();

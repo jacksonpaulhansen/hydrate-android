@@ -1,16 +1,18 @@
 {
+  "appName": "hydrate-android",
+  "platform": "android",
+  "notes": "Legacy config file retained for local project metadata.",
   "github": {
     "owner": "jacksonpaulhansen",
-    "repo": "even_break-ality_pom",
+    "repo": "hydrate-android",
     "pat": ""
   },
-  "appName": "even_break-ality_pom",
-  "publishUrl": "https://jacksonpaulhansen.github.io/even_break-ality_pom/",
+  "publishUrl": "https://jacksonpaulhansen.github.io/hydrate-android/",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
     "userEmail": "270181675+jacksonpaulhansen@users.noreply.github.com",
-    "remoteUrl": "https://github.com/jacksonpaulhansen/even_break-ality_pom.git",
+    "remoteUrl": "https://github.com/jacksonpaulhansen/hydrate-android.git",
     "branch": "main",
     "commitMessagePrefix": "publish",
     "autoSetGithubPagesUrl": true,
@@ -21,8 +23,7 @@
       }
     ],
     "repos": [
-      "https://github.com/jacksonpaulhansen/even_break-ality_pomodoroapp.git",
-      "https://github.com/jacksonpaulhansen/even_break-ality_pom.git"
+      "https://github.com/jacksonpaulhansen/hydrate-android.git"
     ],
     "deployed": false
   }
