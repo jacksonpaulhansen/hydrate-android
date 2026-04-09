@@ -1,4 +1,5 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
+import { Capacitor } from '@capacitor/core';
 import {
   getAuth,
   GoogleAuthProvider,
@@ -94,8 +95,9 @@ export async function signInWithGoogle(): Promise<void> {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
 
-  const isLocalPreview = ['127.0.0.1', 'localhost'].includes(window.location.hostname);
-  if (isLocalPreview) {
+  const isNativePlatform = Capacitor.isNativePlatform();
+  const isLocalBrowserPreview = !isNativePlatform && ['127.0.0.1', 'localhost'].includes(window.location.hostname);
+  if (isLocalBrowserPreview) {
     await signInWithPopup(firebase.auth, provider);
     return;
   }

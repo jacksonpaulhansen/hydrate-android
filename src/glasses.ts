@@ -42,9 +42,11 @@ const MAIN_PANEL_X = 24;
 const MAIN_PANEL_WIDTH = 528;
 const DISPLAY_COLUMNS = 52;
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
+const HIDE_DEBUG_TOOLS = true;
 const CONTROL_URL = 'http://127.0.0.1:8787';
 const REQUIRED_CONTROL_CAPABILITY = 'publish-app';
 const MAX_APP_NAME_LENGTH = 20;
+const BRIDGE_TIMEOUT_MS = 5000;
 
 const state: HydrateState = loadHydrateState();
 let bridge: EvenAppBridge | null = null;
@@ -52,7 +54,7 @@ let bridgeStatus = 'Connecting to Even Hub bridge...';
 let deviceStatus = 'Waiting for glasses status';
 let hudStatus = 'HUD not pushed yet';
 let syncStatus = 'Waiting for cloud sync';
-let debugVisible = true;
+let debugVisible = !HIDE_DEBUG_TOOLS;
 let launchSourceLabel = 'unknown';
 let recentEventLines: string[] = ['Hydrate glasses companion booting'];
 let pushInFlight = false;
@@ -165,13 +167,6 @@ app.innerHTML = `
           <div id="log-list" class="log-list"></div>
         </fieldset>
 
-        <fieldset class="group-box compact-box">
-          <legend>HUD Preview</legend>
-          <div class="sim-display">
-            <pre id="hud-preview" class="hud-preview hud-preview-main"></pre>
-          </div>
-          <div class="hint">This mirrors the text summary pushed into the glasses HUD container.</div>
-        </fieldset>
       </section>
     </fieldset>
 
@@ -185,7 +180,7 @@ app.innerHTML = `
       <p class="hint">Sign into the same Google account as the phone app. Hydration changes sync on open and then poll every 5 seconds.</p>
     </fieldset>
 
-    <fieldset id="debug-tools" class="group-box">
+    <fieldset id="debug-tools" class="group-box" ${HIDE_DEBUG_TOOLS ? 'style="display:none;"' : ''}>
       <legend>Debug Tools</legend>
       <div class="controls">
         <button id="publish-btn" type="button">Publish App</button>
@@ -197,6 +192,13 @@ app.innerHTML = `
       <p class="hint">Debug tools shortcut: ${DEV_TOOLS_TOGGLE_SHORTCUT}. Double click exits the glasses app.</p>
       <pre id="event-log" class="event-log"></pre>
       <pre id="publish-log" class="publish-log"></pre>
+      <fieldset class="group-box compact-box">
+        <legend>HUD Preview</legend>
+        <div class="sim-display">
+          <pre id="hud-preview" class="hud-preview hud-preview-main"></pre>
+        </div>
+        <div class="hint">This mirrors the text summary pushed into the glasses HUD container.</div>
+      </fieldset>
     </fieldset>
   </main>
 `;
@@ -524,14 +526,18 @@ async function applyAction(action: InputAction): Promise<void> {
   }
   if (action === 'UP') {
     state.selectedQuickIndex = findNextQuickAmountIndex(state, 1);
+    touchState(state);
     saveHydrateState(state);
-    await render();
+    syncStatus = `Selected ${selectedQuickAmount()} ml`;
+    await syncHud(`Selected ${selectedQuickAmount()} ml`);
     return;
   }
   if (action === 'DOWN') {
     state.selectedQuickIndex = findNextQuickAmountIndex(state, -1);
+    touchState(state);
     saveHydrateState(state);
-    await render();
+    syncStatus = `Selected ${selectedQuickAmount()} ml`;
+    await syncHud(`Selected ${selectedQuickAmount()} ml`);
     return;
   }
   await exitGlassesApp();
@@ -672,15 +678,13 @@ function setKeyboardFallback(): void {
       return;
     }
     if (event.key === 'ArrowUp') {
-      state.selectedQuickIndex = findNextQuickAmountIndex(state, 1);
-      saveHydrateState(state);
-      void render();
+      event.preventDefault();
+      void applyAction('UP');
       return;
     }
     if (event.key === 'ArrowDown') {
-      state.selectedQuickIndex = findNextQuickAmountIndex(state, -1);
-      saveHydrateState(state);
-      void render();
+      event.preventDefault();
+      void applyAction('DOWN');
       return;
     }
   });
@@ -692,23 +696,26 @@ function setKeyboardFallback(): void {
 
 async function connectBridge(): Promise<void> {
   try {
-    bridge = await waitForEvenAppBridge();
+    bridge = await Promise.race([
+      waitForEvenAppBridge(),
+      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('Even bridge timeout')), BRIDGE_TIMEOUT_MS)),
+    ]);
     bridgeStatus = 'Even Hub bridge ready';
     appendEventLog('Bridge ready');
 
-    bridge.onLaunchSource((source) => {
+    bridge.onLaunchSource?.((source) => {
       launchSourceLabel = source;
       appendEventLog(`Launch source ${source}`);
       void render();
     });
 
-    bridge.onDeviceStatusChanged((status) => {
+    bridge.onDeviceStatusChanged?.((status) => {
       deviceStatus = `Glasses ${status.connectType}${typeof status.batteryLevel === 'number' ? ` ${status.batteryLevel}%` : ''}`;
       appendEventLog(`Device status ${status.connectType}`);
       void render();
     });
 
-    bridge.onEvenHubEvent((event) => {
+    bridge.onEvenHubEvent?.((event) => {
       const eventType = extractEventType(event);
       let action = mapEventTypeToAction(eventType);
       if (!action && event?.textEvent && !event?.listEvent && !event?.sysEvent) action = 'CLICK';
