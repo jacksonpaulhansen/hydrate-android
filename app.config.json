@@ -1,14 +1,14 @@
 {
-  "appName": "hydrate-android",
-  "platform": "android",
-  "notes": "Legacy config file retained for local project metadata.",
+  "androidDownloadUrl": "./hydrate-latest.apk",
   "github": {
     "owner": "jacksonpaulhansen",
     "repo": "hydrate-android",
     "pat": ""
   },
+  "appName": "hydrate-android",
   "publishUrl": "https://jacksonpaulhansen.github.io/hydrate-android/",
-  "androidDownloadUrl": "https://jacksonpaulhansen.github.io/hydrate-android/hydrate-latest.apk",
+  "webAppUrl": "https://jacksonpaulhansen.github.io/hydrate-android/",
+  "downloadPageUrl": "https://jacksonpaulhansen.github.io/hydrate-android/download.html",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
@@ -27,7 +27,5 @@
       "https://github.com/jacksonpaulhansen/hydrate-android.git"
     ],
     "deployed": false
-  },
-  "webAppUrl": "https://jacksonpaulhansen.github.io/hydrate-android/",
-  "downloadPageUrl": "https://jacksonpaulhansen.github.io/hydrate-android/download.html"
+  }
 }
