@@ -12,6 +12,15 @@ const apiVersion = '2026-04-09-publish-app-2';
 let publishRunning = false;
 let publishStartedAt = 0;
 let ehpkRunning = false;
+let apkBuildRunning = false;
+let apkBuildStatus = {
+  state: 'IDLE',
+  logs: [],
+  startedAt: '',
+  finishedAt: '',
+  error: '',
+  result: null,
+};
 let lastPublish = {
   ok: null,
   error: '',
@@ -116,16 +125,21 @@ function runGitWithPat(args, owner, repo, token) {
 }
 
 async function githubApi({ token, method, pathName, body }) {
-  const response = await fetch(`https://api.github.com${pathName}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let response;
+  try {
+    response = await fetch(`https://api.github.com${pathName}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    throw new Error(`Network error reaching GitHub API (${pathName}): ${String(error)}. Check internet/VPN/firewall and retry.`);
+  }
 
   const text = await response.text();
   let json = null;
@@ -146,16 +160,6 @@ function sanitizeRepoName(name) {
   return clean || 'even-g2-app';
 }
 
-function toRepoHttpUrl(remoteUrl) {
-  const clean = String(remoteUrl || '').trim().replace(/\.git$/i, '');
-  if (!clean) return '';
-  if (clean.startsWith('http://') || clean.startsWith('https://')) return clean;
-  if (clean.startsWith('git@github.com:')) {
-    return `https://github.com/${clean.slice('git@github.com:'.length)}`;
-  }
-  return clean;
-}
-
 function htmlEscape(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -163,6 +167,79 @@ function htmlEscape(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function resolveJavaHome() {
+  const envJavaHome = String(process.env.JAVA_HOME || '').trim();
+  if (envJavaHome && fs.existsSync(path.join(envJavaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java'))) {
+    return envJavaHome;
+  }
+
+  const candidates = [
+    'C:\\Program Files\\Android\\Android Studio\\jbr',
+    'C:\\Program Files\\Android\\Android Studio\\jre',
+  ];
+  for (const candidate of candidates) {
+    const javaBin = path.join(candidate, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+    if (fs.existsSync(javaBin)) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+async function buildAndStageAndroidApk(logs) {
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const androidDir = path.join(projectRoot, 'android');
+  const publicDir = path.join(projectRoot, 'public');
+  const outputFileName = 'hydrate-latest.apk';
+  const stagedApkPath = path.join(publicDir, outputFileName);
+  const javaHome = resolveJavaHome();
+
+  logs.push('Building Android web assets + Capacitor sync...');
+  await runCommand(npmCmd, ['run', 'build:app']);
+
+  if (!fs.existsSync(androidDir)) {
+    throw new Error('Android project folder is missing (`android/`).');
+  }
+
+  if (!javaHome) {
+    throw new Error('Java was not found. Install Android Studio (or JDK) and set JAVA_HOME before using one-click APK publish.');
+  }
+
+  const gradleEnv = {
+    ...process.env,
+    JAVA_HOME: javaHome,
+    PATH: `${path.join(javaHome, 'bin')}${path.delimiter}${process.env.PATH || ''}`,
+  };
+  logs.push(`Using JAVA_HOME: ${javaHome}`);
+
+  logs.push('Building Android debug APK...');
+  if (process.platform === 'win32') {
+    await runCommand('cmd.exe', ['/d', '/s', '/c', 'gradlew.bat', 'assembleDebug'], { cwd: androidDir, env: gradleEnv });
+  } else {
+    await runCommand('./gradlew', ['assembleDebug'], { cwd: androidDir, env: gradleEnv });
+  }
+
+  const candidates = [
+    path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+    path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk'),
+    path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release-unsigned.apk'),
+  ];
+  const sourceApkPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!sourceApkPath) {
+    throw new Error('Android build finished but no APK was found in `android/app/build/outputs/apk`.');
+  }
+
+  fs.mkdirSync(publicDir, { recursive: true });
+  fs.copyFileSync(sourceApkPath, stagedApkPath);
+  logs.push(`Staged APK for publish: ${stagedApkPath}`);
+
+  return {
+    sourceApkPath,
+    stagedApkPath,
+    relativePath: outputFileName,
+  };
 }
 
 function writeDownloadPage({ appName, webAppUrl, androidDownloadUrl, publishUrl }) {
@@ -365,7 +442,7 @@ async function runEhpkBuild(appNameRaw) {
     logs.push(`App name trimmed for EHPK (max 20 chars): "${appName}" -> "${ehpkName}"`);
   }
   appJson.name = ehpkName;
-  appJson.entrypoint = 'glasses.html';
+  appJson.entrypoint = 'index.html';
   appJson.version = String(appJson.version || '0.1.0');
   if (!appJson.package_id || String(appJson.package_id).includes('example')) {
     appJson.package_id = `com.${safeName.replace(/[^a-z0-9.]/g, '') || 'eveng2app'}`;
@@ -497,7 +574,7 @@ async function runPublishApp(appName, patInput) {
   const repo = sanitizeRepoName(appName);
   const remoteUrl = `https://github.com/${owner}/${repo}.git`;
   const publishUrl = `https://${owner}.github.io/${repo}/`;
-  const webAppUrl = `${publishUrl}glasses.html`;
+  const webAppUrl = publishUrl;
   const downloadPageUrl = `${publishUrl}download.html`;
 
   // Create repo if needed.
@@ -562,8 +639,16 @@ async function runPublishApp(appName, patInput) {
 
   const configWithUrls = readConfig();
   const explicitAndroidDownloadUrl = String(configWithUrls.androidDownloadUrl ?? '').trim();
-  const fallbackReleaseUrl = `${toRepoHttpUrl(remoteUrl)}/releases/latest`;
-  const androidDownloadUrl = explicitAndroidDownloadUrl || fallbackReleaseUrl;
+  const fallbackReleaseUrl = `${remoteUrl.replace(/\.git$/i, '')}/releases/latest`;
+  const stagedApkRelativePath = 'hydrate-latest.apk';
+  const stagedApkPath = path.join(projectRoot, 'public', stagedApkRelativePath);
+  let androidDownloadUrl = explicitAndroidDownloadUrl;
+  if (!androidDownloadUrl && fs.existsSync(stagedApkPath)) {
+    androidDownloadUrl = `${publishUrl}${stagedApkRelativePath}`;
+  }
+  if (!androidDownloadUrl) {
+    androidDownloadUrl = fallbackReleaseUrl;
+  }
   const writtenDownloadPath = writeDownloadPage({
     appName,
     webAppUrl,
@@ -737,6 +822,38 @@ async function runPublishApp(appName, patInput) {
   };
 }
 
+async function runBuildApk(existingLogs = null) {
+  const logs = Array.isArray(existingLogs) ? existingLogs : [];
+  const staged = await buildAndStageAndroidApk(logs);
+
+  const config = readConfig();
+  const publishUrl = String(config.publishUrl ?? '').trim();
+  const webAppUrl = String(config.webAppUrl ?? publishUrl).trim() || './';
+  const androidDownloadUrl = publishUrl ? `${publishUrl}${staged.relativePath}` : `./${staged.relativePath}`;
+
+  config.androidDownloadUrl = androidDownloadUrl;
+  writeConfig(config);
+
+  if (publishUrl) {
+    const writtenDownloadPath = writeDownloadPage({
+      appName: String(config.appName ?? 'Hydrate'),
+      webAppUrl,
+      androidDownloadUrl,
+      publishUrl,
+    });
+    logs.push(`Updated download page: ${writtenDownloadPath}`);
+  }
+
+  logs.push(`APK ready: ${staged.stagedApkPath}`);
+  logs.push(`Android binary source URL: ${androidDownloadUrl}`);
+
+  return {
+    logs: logs.join('\n'),
+    stagedApkPath: staged.stagedApkPath,
+    androidDownloadUrl,
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   if (!req.url) {
     sendJson(res, 404, { ok: false, error: 'Not found' });
@@ -753,7 +870,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'control-server',
       version: apiVersion,
-      capabilities: ['publish', 'publish-app', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk', 'todoist'],
+      capabilities: ['publish', 'publish-app', 'build-apk', 'reboot', 'link-git', 'switch-git-account', 'build-ehpk', 'todoist'],
     });
     return;
   }
@@ -906,6 +1023,61 @@ const server = http.createServer(async (req, res) => {
       } finally {
         ehpkRunning = false;
       }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/build-apk') {
+    if (apkBuildRunning) {
+      sendJson(res, 409, {
+        ok: false,
+        error: 'APK build already running',
+        state: apkBuildStatus.state,
+        logs: apkBuildStatus.logs.join('\n'),
+      });
+      return;
+    }
+
+    apkBuildRunning = true;
+    apkBuildStatus = {
+      state: 'RUNNING',
+      logs: [`[${new Date().toLocaleTimeString()}] Build APK started...`],
+      startedAt: new Date().toISOString(),
+      finishedAt: '',
+      error: '',
+      result: null,
+    };
+
+    void (async () => {
+      try {
+        const result = await runBuildApk(apkBuildStatus.logs);
+        apkBuildStatus.state = 'DONE';
+        apkBuildStatus.result = result;
+        apkBuildStatus.logs.push(`[${new Date().toLocaleTimeString()}] Build APK completed.`);
+      } catch (error) {
+        apkBuildStatus.state = 'FAILED';
+        apkBuildStatus.error = String(error);
+        apkBuildStatus.logs.push(`[${new Date().toLocaleTimeString()}] Build APK failed: ${String(error)}`);
+      } finally {
+        apkBuildRunning = false;
+        apkBuildStatus.finishedAt = new Date().toISOString();
+      }
+    })();
+
+    sendJson(res, 202, { ok: true, state: 'RUNNING', message: 'APK build started' });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/build-apk-status') {
+    sendJson(res, 200, {
+      ok: true,
+      state: apkBuildStatus.state,
+      running: apkBuildRunning,
+      startedAt: apkBuildStatus.startedAt,
+      finishedAt: apkBuildStatus.finishedAt,
+      error: apkBuildStatus.error,
+      logs: apkBuildStatus.logs.join('\n'),
+      result: apkBuildStatus.result,
     });
     return;
   }

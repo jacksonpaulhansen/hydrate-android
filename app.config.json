@@ -8,7 +8,7 @@
     "pat": ""
   },
   "publishUrl": "https://jacksonpaulhansen.github.io/hydrate-android/",
-  "androidDownloadUrl": "",
+  "androidDownloadUrl": "https://jacksonpaulhansen.github.io/hydrate-android/hydrate-latest.apk",
   "git": {
     "enabled": true,
     "userName": "jacksonpaulhansen",
@@ -28,6 +28,6 @@
     ],
     "deployed": false
   },
-  "webAppUrl": "https://jacksonpaulhansen.github.io/hydrate-android/glasses.html",
+  "webAppUrl": "https://jacksonpaulhansen.github.io/hydrate-android/",
   "downloadPageUrl": "https://jacksonpaulhansen.github.io/hydrate-android/download.html"
 }

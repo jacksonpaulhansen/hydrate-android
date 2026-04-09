@@ -71,7 +71,7 @@ let lastResolvedActionAt = 0;
 let lastEventSignature = '';
 let lastEventAt = 0;
 let lastEventLabel = '';
-let publishState: 'IDLE' | 'RUNNING' | 'PACKING' | 'DONE' | 'FAILED' = 'IDLE';
+let publishState: 'IDLE' | 'RUNNING' | 'PACKING' | 'APK' | 'DONE' | 'FAILED' = 'IDLE';
 let deployed = false;
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -177,7 +177,7 @@ app.innerHTML = `
         <button id="sign-out-btn" type="button">Sign Out</button>
       </div>
       <div class="controls controls-right">
-        <button id="download-apk-btn" type="button">Download APP</button>
+        <button id="download-apk-btn" type="button">Download APK</button>
       </div>
       <div id="auth-status" class="muted-copy"></div>
       <p class="hint">Sign into the same Google account as the phone app. Hydration changes sync on open and then poll every 5 seconds.</p>
@@ -187,6 +187,7 @@ app.innerHTML = `
       <legend>Debug Tools</legend>
       <div class="controls">
         <button id="publish-btn" type="button">Publish App</button>
+        <button id="build-apk-btn" type="button">Build APK</button>
         <button id="ehpk-btn" type="button">Build EHPK</button>
         <button id="refresh-device-btn" type="button">Refresh Device Info</button>
         <button id="clear-log-btn" type="button">Clear Event Log</button>
@@ -232,6 +233,7 @@ const exitBtn = document.querySelector<HTMLButtonElement>('#exit-btn')!;
 const signInBtn = document.querySelector<HTMLButtonElement>('#sign-in-btn')!;
 const signOutBtn = document.querySelector<HTMLButtonElement>('#sign-out-btn')!;
 const publishBtn = document.querySelector<HTMLButtonElement>('#publish-btn')!;
+const buildApkBtn = document.querySelector<HTMLButtonElement>('#build-apk-btn')!;
 const ehpkBtn = document.querySelector<HTMLButtonElement>('#ehpk-btn')!;
 const publishStatusLabel = document.querySelector<HTMLSpanElement>('#publish-status')!;
 const dailyGoalInput = document.querySelector<HTMLInputElement>('#daily-goal')!;
@@ -768,6 +770,7 @@ async function publishApp(): Promise<void> {
 
   publishState = 'RUNNING';
   publishBtn.disabled = true;
+  buildApkBtn.disabled = true;
   ehpkBtn.disabled = true;
   publishLog.textContent = `Publishing "${appName}"...`;
   await render();
@@ -818,19 +821,83 @@ async function publishApp(): Promise<void> {
 
     publishState = 'DONE';
     deployed = true;
-    publishLog.textContent = `${body?.logs ?? 'Publish complete.'}\n\nWeb App URL:\n${body?.webAppUrl ?? `${body?.publishUrl ?? 'unknown'}/glasses.html`}\n\nAndroid Download Page:\n${body?.downloadPageUrl ?? `${body?.publishUrl ?? 'unknown'}/download.html`}\n\nAndroid Binary Source:\n${body?.androidDownloadUrl ?? 'configure app.config.json -> androidDownloadUrl to set a direct APK link'}`;
+    publishLog.textContent = `${body?.logs ?? 'Publish complete.'}\n\nWeb App URL:\n${body?.webAppUrl ?? `${body?.publishUrl ?? 'unknown'}`}\n\nAndroid URL:\n${body?.publishUrl ? `${body.publishUrl}android.html` : 'unknown'}\n\nAndroid Download Page:\n${body?.downloadPageUrl ?? `${body?.publishUrl ?? 'unknown'}/download.html`}\n\nAndroid Binary Source:\n${body?.androidDownloadUrl ?? 'configure app.config.json -> androidDownloadUrl to set a direct APK link'}`;
   } catch (error) {
     publishState = 'FAILED';
     publishLog.textContent = `Error: ${String(error)}`;
   } finally {
     publishBtn.disabled = false;
+    buildApkBtn.disabled = false;
+    ehpkBtn.disabled = false;
+    await render();
+  }
+}
+
+async function buildApk(): Promise<void> {
+  if (publishState === 'RUNNING' || publishState === 'PACKING' || publishState === 'APK') {
+    publishLog.textContent = 'Another operation is in progress. Please wait...';
+    await render();
+    return;
+  }
+
+  publishState = 'APK';
+  publishBtn.disabled = true;
+  buildApkBtn.disabled = true;
+  ehpkBtn.disabled = true;
+  publishLog.textContent = 'Building Android APK...';
+  await render();
+
+  try {
+    const startResponse = await fetch(`${CONTROL_URL}/build-apk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const startBody = await startResponse.json().catch(() => null) as { error?: string; logs?: string } | null;
+    if (!startResponse.ok && startResponse.status !== 409) {
+      throw new Error(startBody?.error ?? `HTTP ${startResponse.status}`);
+    }
+
+    while (true) {
+      const statusResponse = await fetch(`${CONTROL_URL}/build-apk-status`, { cache: 'no-store' });
+      const statusBody = await statusResponse.json().catch(() => null) as {
+        state?: 'IDLE' | 'RUNNING' | 'DONE' | 'FAILED';
+        logs?: string;
+        error?: string;
+      } | null;
+
+      if (!statusResponse.ok || !statusBody) {
+        throw new Error(`Failed to read APK build status (HTTP ${statusResponse.status})`);
+      }
+
+      publishLog.textContent = statusBody.logs || 'Building Android APK...';
+      await render();
+
+      if (statusBody.state === 'DONE') {
+        publishState = 'DONE';
+        publishLog.textContent = `${statusBody.logs ?? 'APK build complete.'}\n\nNext step: click Publish/Update App to upload the new APK.`;
+        break;
+      }
+
+      if (statusBody.state === 'FAILED') {
+        throw new Error(statusBody.error || statusBody.logs || 'APK build failed.');
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
+  } catch (error) {
+    publishState = 'FAILED';
+    publishLog.textContent = `Error: ${String(error)}`;
+  } finally {
+    publishBtn.disabled = false;
+    buildApkBtn.disabled = false;
     ehpkBtn.disabled = false;
     await render();
   }
 }
 
 async function buildEhpk(): Promise<void> {
-  if (publishState === 'RUNNING' || publishState === 'PACKING') {
+  if (publishState === 'RUNNING' || publishState === 'PACKING' || publishState === 'APK') {
     publishLog.textContent = 'Another operation is in progress. Please wait...';
     await render();
     return;
@@ -849,6 +916,7 @@ async function buildEhpk(): Promise<void> {
 
   publishState = 'PACKING';
   publishBtn.disabled = true;
+  buildApkBtn.disabled = true;
   ehpkBtn.disabled = true;
   publishLog.textContent = `Building .ehpk for "${appName}"...`;
   await render();
@@ -877,6 +945,7 @@ async function buildEhpk(): Promise<void> {
     publishLog.textContent = `Error: ${String(error)}`;
   } finally {
     publishBtn.disabled = false;
+    buildApkBtn.disabled = false;
     ehpkBtn.disabled = false;
     await render();
   }
@@ -939,6 +1008,9 @@ async function init(): Promise<void> {
   });
   publishBtn.addEventListener('click', () => {
     void publishApp();
+  });
+  buildApkBtn.addEventListener('click', () => {
+    void buildApk();
   });
   ehpkBtn.addEventListener('click', () => {
     void buildEhpk();

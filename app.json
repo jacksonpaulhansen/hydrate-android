@@ -2,10 +2,10 @@
   "name": "hydrate-android",
   "package_id": "com.hydrate.glasses",
   "edition": "202601",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.7",
-  "entrypoint": "glasses.html",
+  "entrypoint": "index.html",
   "description": "Hydrate G2 companion app for Even Hub with cloud sync to the Android companion app.",
   "permissions": [
     {

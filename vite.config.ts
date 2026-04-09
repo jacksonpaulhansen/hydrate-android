@@ -13,8 +13,8 @@ export default defineConfig(({ mode }) => {
     build: {
       rollupOptions: {
         input: {
-          phone: resolve(__dirname, 'index.html'),
-          glasses: resolve(__dirname, 'glasses.html'),
+          glasses: resolve(__dirname, 'index.html'),
+          android: resolve(__dirname, 'android.html'),
         },
       },
     },
