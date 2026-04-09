@@ -242,6 +242,7 @@ button, input { font: inherit; }
 .primary-btn { min-width: 140px; background: linear-gradient(135deg, rgba(103, 215, 255, 0.24), rgba(47, 168, 255, 0.32)); }
 .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .controls-spread { justify-content: space-between; }
+.controls-right { justify-content: flex-end; }
 .status-chip {
   padding: 8px 12px;
   border-radius: 999px;

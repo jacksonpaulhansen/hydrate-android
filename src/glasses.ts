@@ -176,6 +176,9 @@ app.innerHTML = `
         <button id="sign-in-btn" type="button">Sign In With Google</button>
         <button id="sign-out-btn" type="button">Sign Out</button>
       </div>
+      <div class="controls controls-right">
+        <button id="download-apk-btn" type="button">Download APP</button>
+      </div>
       <div id="auth-status" class="muted-copy"></div>
       <p class="hint">Sign into the same Google account as the phone app. Hydration changes sync on open and then poll every 5 seconds.</p>
     </fieldset>
@@ -224,6 +227,7 @@ const customAmountInput = document.querySelector<HTMLInputElement>('#custom-amou
 const customAddBtn = document.querySelector<HTMLButtonElement>('#custom-add-btn')!;
 const removeLastBtn = document.querySelector<HTMLButtonElement>('#remove-last-btn')!;
 const pushHudBtn = document.querySelector<HTMLButtonElement>('#push-hud-btn')!;
+const downloadApkBtn = document.querySelector<HTMLButtonElement>('#download-apk-btn')!;
 const exitBtn = document.querySelector<HTMLButtonElement>('#exit-btn')!;
 const signInBtn = document.querySelector<HTMLButtonElement>('#sign-in-btn')!;
 const signOutBtn = document.querySelector<HTMLButtonElement>('#sign-out-btn')!;
@@ -901,6 +905,10 @@ async function init(): Promise<void> {
   pushHudBtn.addEventListener('click', () => {
     syncStatus = 'Manual HUD push requested';
     void pushHudToGlasses('manual push');
+  });
+
+  downloadApkBtn.addEventListener('click', () => {
+    window.location.href = `${window.location.origin}${import.meta.env.BASE_URL}download.html`;
   });
 
   exitBtn.addEventListener('click', () => {

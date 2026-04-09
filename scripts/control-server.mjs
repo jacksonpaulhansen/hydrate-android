@@ -173,7 +173,6 @@ function writeDownloadPage({ appName, webAppUrl, androidDownloadUrl, publishUrl 
   const safeAppName = htmlEscape(appName || 'Hydrate');
   const safeWebAppUrl = htmlEscape(webAppUrl);
   const safeAndroidDownloadUrl = htmlEscape(androidDownloadUrl);
-  const safePublishUrl = htmlEscape(publishUrl);
   const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -182,25 +181,19 @@ function writeDownloadPage({ appName, webAppUrl, androidDownloadUrl, publishUrl 
     <title>${safeAppName} Downloads</title>
     <style>
       body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f1218; color: #e6edf3; font-family: Consolas, 'Courier New', monospace; }
-      main { width: min(760px, calc(100vw - 32px)); border: 1px solid #2f3742; border-radius: 12px; background: #151b24; padding: 20px; }
-      h1 { margin: 0 0 10px; font-size: 1.4rem; }
-      p { margin: 6px 0 14px; color: #b7c3d0; }
-      .links { display: grid; gap: 10px; }
-      .link { display: block; padding: 12px 14px; border: 1px solid #364253; border-radius: 10px; background: #1b2430; color: #d8f0ff; text-decoration: none; }
-      .meta { margin-top: 16px; font-size: 0.78rem; color: #91a3b7; word-break: break-all; }
-      code { color: #9de0ff; }
+      main { width: min(520px, calc(100vw - 32px)); border: 1px solid #2f3742; border-radius: 12px; background: #151b24; padding: 20px; text-align: center; }
+      h1 { margin: 0 0 14px; font-size: 1.35rem; }
+      .actions { display: grid; gap: 12px; }
+      .btn { display: block; padding: 12px 14px; border: 1px solid #364253; border-radius: 10px; background: #1b2430; color: #d8f0ff; text-decoration: none; font-size: 0.95rem; }
+      .btn.primary { border-color: #4b7ecf; background: #21314f; }
     </style>
   </head>
   <body>
     <main>
-      <h1>${safeAppName} Install & Launch</h1>
-      <p>Use these links for beta testing on glasses and Android.</p>
-      <div class="links">
-        <a class="link" href="${safeWebAppUrl}">Open Web App (Glasses): ${safeWebAppUrl}</a>
-        <a class="link" href="${safeAndroidDownloadUrl}">Download Android App: ${safeAndroidDownloadUrl}</a>
-      </div>
-      <div class="meta">
-        Base URL: <code>${safePublishUrl}</code>
+      <h1>${safeAppName}</h1>
+      <div class="actions">
+        <a class="btn primary" href="${safeAndroidDownloadUrl}">Download APK</a>
+        <a class="btn" href="${safeWebAppUrl}">Back to Glasses</a>
       </div>
     </main>
   </body>
