@@ -774,7 +774,15 @@ async function publishApp(): Promise<void> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ appName }),
     });
-    let body = await response.json().catch(() => null) as { error?: string; logs?: string; code?: string; publishUrl?: string } | null;
+    let body = await response.json().catch(() => null) as {
+      error?: string;
+      logs?: string;
+      code?: string;
+      publishUrl?: string;
+      webAppUrl?: string;
+      downloadPageUrl?: string;
+      androidDownloadUrl?: string;
+    } | null;
 
     if (!response.ok && (body?.code === 'PAT_REQUIRED' || body?.code === 'INVALID_PAT')) {
       const pat = window.prompt(body?.code === 'INVALID_PAT' ? 'Saved PAT is invalid. Paste a new GitHub PAT:' : 'GitHub PAT required. Paste PAT:');
@@ -784,7 +792,14 @@ async function publishApp(): Promise<void> {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ appName, pat: pat.trim() }),
       });
-      body = await response.json().catch(() => null) as { error?: string; logs?: string; publishUrl?: string } | null;
+      body = await response.json().catch(() => null) as {
+        error?: string;
+        logs?: string;
+        publishUrl?: string;
+        webAppUrl?: string;
+        downloadPageUrl?: string;
+        androidDownloadUrl?: string;
+      } | null;
     }
 
     if (!response.ok) {
@@ -799,7 +814,7 @@ async function publishApp(): Promise<void> {
 
     publishState = 'DONE';
     deployed = true;
-    publishLog.textContent = `${body?.logs ?? 'Publish complete.'}\n\nPublished URL:\n${body?.publishUrl ?? 'unknown'}`;
+    publishLog.textContent = `${body?.logs ?? 'Publish complete.'}\n\nWeb App URL:\n${body?.webAppUrl ?? `${body?.publishUrl ?? 'unknown'}/glasses.html`}\n\nAndroid Download Page:\n${body?.downloadPageUrl ?? `${body?.publishUrl ?? 'unknown'}/download.html`}\n\nAndroid Binary Source:\n${body?.androidDownloadUrl ?? 'configure app.config.json -> androidDownloadUrl to set a direct APK link'}`;
   } catch (error) {
     publishState = 'FAILED';
     publishLog.textContent = `Error: ${String(error)}`;

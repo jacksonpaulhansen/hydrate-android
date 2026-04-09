@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import QRCode from 'qrcode';
 
 const projectRoot = process.cwd();
 const configPath = path.join(projectRoot, 'app.config.json');
@@ -23,12 +22,21 @@ if (!publishUrl) {
   throw new Error('publishUrl is empty. Set app.config.json -> publishUrl.');
 }
 
-await QRCode.toFile(outPngPath, publishUrl, {
-  margin: 2,
-  width: 460,
-});
+let localQrGenerated = false;
+try {
+  const { default: QRCode } = await import('qrcode');
+  await QRCode.toFile(outPngPath, publishUrl, {
+    margin: 2,
+    width: 460,
+  });
+  localQrGenerated = true;
+} catch (error) {
+  console.warn(`qrcode package unavailable, using hosted QR fallback: ${String(error)}`);
+}
 
 const safeUrl = publishUrl.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const hostedQrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=460x460&data=${encodeURIComponent(publishUrl)}`;
+const qrSrc = localQrGenerated ? './publish-qr.png' : hostedQrUrl;
 const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -45,12 +53,17 @@ const html = `<!doctype html>
   <body>
     <main>
       <h2>Scan QR In Even App</h2>
-      <img src="./publish-qr.png" alt="Publish QR" />
+      <img src="${qrSrc}" alt="Publish QR" />
       <p><code>${safeUrl}</code></p>
+      ${localQrGenerated ? '' : '<p><small>Using hosted QR fallback because local qrcode package is not installed.</small></p>'}
     </main>
   </body>
 </html>`;
 
 fs.writeFileSync(outHtmlPath, html, 'utf8');
-console.log(`QR written: ${outPngPath}`);
+if (localQrGenerated) {
+  console.log(`QR written: ${outPngPath}`);
+} else {
+  console.log('QR written via hosted fallback URL in publish-qr.html');
+}
 console.log(`Viewer: ${outHtmlPath}`);

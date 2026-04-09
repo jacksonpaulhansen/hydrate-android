@@ -7,7 +7,7 @@ import fs from 'node:fs';
 const host = '127.0.0.1';
 const port = 8787;
 const projectRoot = process.cwd();
-const apiVersion = '2026-03-22-publish-app-1';
+const apiVersion = '2026-04-09-publish-app-2';
 
 let publishRunning = false;
 let publishStartedAt = 0;
@@ -144,6 +144,70 @@ function sanitizeRepoName(name) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 100);
   return clean || 'even-g2-app';
+}
+
+function toRepoHttpUrl(remoteUrl) {
+  const clean = String(remoteUrl || '').trim().replace(/\.git$/i, '');
+  if (!clean) return '';
+  if (clean.startsWith('http://') || clean.startsWith('https://')) return clean;
+  if (clean.startsWith('git@github.com:')) {
+    return `https://github.com/${clean.slice('git@github.com:'.length)}`;
+  }
+  return clean;
+}
+
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function writeDownloadPage({ appName, webAppUrl, androidDownloadUrl, publishUrl }) {
+  const publicDir = path.join(projectRoot, 'public');
+  const downloadHtmlPath = path.join(publicDir, 'download.html');
+  fs.mkdirSync(publicDir, { recursive: true });
+
+  const safeAppName = htmlEscape(appName || 'Hydrate');
+  const safeWebAppUrl = htmlEscape(webAppUrl);
+  const safeAndroidDownloadUrl = htmlEscape(androidDownloadUrl);
+  const safePublishUrl = htmlEscape(publishUrl);
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>${safeAppName} Downloads</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f1218; color: #e6edf3; font-family: Consolas, 'Courier New', monospace; }
+      main { width: min(760px, calc(100vw - 32px)); border: 1px solid #2f3742; border-radius: 12px; background: #151b24; padding: 20px; }
+      h1 { margin: 0 0 10px; font-size: 1.4rem; }
+      p { margin: 6px 0 14px; color: #b7c3d0; }
+      .links { display: grid; gap: 10px; }
+      .link { display: block; padding: 12px 14px; border: 1px solid #364253; border-radius: 10px; background: #1b2430; color: #d8f0ff; text-decoration: none; }
+      .meta { margin-top: 16px; font-size: 0.78rem; color: #91a3b7; word-break: break-all; }
+      code { color: #9de0ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${safeAppName} Install & Launch</h1>
+      <p>Use these links for beta testing on glasses and Android.</p>
+      <div class="links">
+        <a class="link" href="${safeWebAppUrl}">Open Web App (Glasses): ${safeWebAppUrl}</a>
+        <a class="link" href="${safeAndroidDownloadUrl}">Download Android App: ${safeAndroidDownloadUrl}</a>
+      </div>
+      <div class="meta">
+        Base URL: <code>${safePublishUrl}</code>
+      </div>
+    </main>
+  </body>
+</html>`;
+
+  fs.writeFileSync(downloadHtmlPath, html, 'utf8');
+  return downloadHtmlPath;
 }
 
 function runPublishLegacy() {
@@ -440,6 +504,8 @@ async function runPublishApp(appName, patInput) {
   const repo = sanitizeRepoName(appName);
   const remoteUrl = `https://github.com/${owner}/${repo}.git`;
   const publishUrl = `https://${owner}.github.io/${repo}/`;
+  const webAppUrl = `${publishUrl}glasses.html`;
+  const downloadPageUrl = `${publishUrl}download.html`;
 
   // Create repo if needed.
   const createRepoResult = await githubApi({
@@ -471,6 +537,8 @@ async function runPublishApp(appName, patInput) {
 
   config.appName = appName;
   config.publishUrl = publishUrl;
+  config.webAppUrl = webAppUrl;
+  config.downloadPageUrl = downloadPageUrl;
   config.github.owner = owner;
   config.github.repo = repo;
   config.github.pat = '';
@@ -498,6 +566,21 @@ async function runPublishApp(appName, patInput) {
     secrets.githubPat = token;
     writeLocalSecrets(secrets);
   }
+
+  const configWithUrls = readConfig();
+  const explicitAndroidDownloadUrl = String(configWithUrls.androidDownloadUrl ?? '').trim();
+  const fallbackReleaseUrl = `${toRepoHttpUrl(remoteUrl)}/releases/latest`;
+  const androidDownloadUrl = explicitAndroidDownloadUrl || fallbackReleaseUrl;
+  const writtenDownloadPath = writeDownloadPage({
+    appName,
+    webAppUrl,
+    androidDownloadUrl,
+    publishUrl,
+  });
+  logs.push(`Generated download page: ${writtenDownloadPath}`);
+  logs.push(`Web app URL: ${webAppUrl}`);
+  logs.push(`Android download page URL: ${downloadPageUrl}`);
+  logs.push(`Android binary source URL: ${androidDownloadUrl}`);
 
   if (!fs.existsSync(path.join(projectRoot, '.git'))) {
     await runGit(['init', '-b', branch]);
@@ -635,7 +718,7 @@ async function runPublishApp(appName, patInput) {
   finalConfig.git.deployed = true;
   writeConfig(finalConfig);
 
-  await generateQrForUrl(publishUrl);
+  await generateQrForUrl(webAppUrl);
   if (repoCreated) {
     logs.push('First publish detected. Waiting 35s before opening site...');
     await sleep(35000);
@@ -647,11 +730,14 @@ async function runPublishApp(appName, patInput) {
   } else {
     logs.push('Publish URL still propagating; opening anyway.');
   }
-  openUrl(publishUrl);
+  openUrl(webAppUrl);
 
   return {
     logs: logs.join('\n'),
     publishUrl,
+    webAppUrl,
+    downloadPageUrl,
+    androidDownloadUrl,
     remoteUrl,
     owner,
     repo,
