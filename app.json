@@ -1,2 +1,31 @@
 {
+  "name": "hydrate-android",
+  "package_id": "com.hydrate.glasses",
+  "edition": "202601",
+  "version": "0.1.3",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.7",
+  "entrypoint": "index.html",
+  "description": "Hydrate G2 companion app for Even Hub with cloud sync to the Android companion app.",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Needed for cloud sync and local publish/build control endpoints.",
+      "whitelist": [
+        "http://127.0.0.1",
+        "https://jacksonpaulhansen.github.io",
+        "https://hydrate-ff340.firebaseapp.com",
+        "https://identitytoolkit.googleapis.com",
+        "https://securetoken.googleapis.com",
+        "https://firestore.googleapis.com",
+        "https://www.googleapis.com",
+        "https://accounts.google.com",
+        "https://apis.google.com",
+        "https://www.gstatic.com"
+      ]
+    }
+  ],
+  "supported_languages": [
+    "en"
+  ]
 }

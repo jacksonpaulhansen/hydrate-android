@@ -4,6 +4,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   onAuthStateChanged,
+  signInWithCredential,
   signInWithPopup,
   signInWithRedirect,
   signOut,
@@ -89,6 +90,15 @@ export function listenForUserChange(callback: (user: User | null) => void): Unsu
   return onAuthStateChanged(firebase.auth, callback);
 }
 
+type NativeFirebaseAuthPlugin = {
+  signInWithGoogle?: (options?: Record<string, unknown>) => Promise<any>;
+};
+
+function getNativeFirebaseAuthPlugin(): NativeFirebaseAuthPlugin | null {
+  const plugins = (window as any)?.Capacitor?.Plugins ?? (Capacitor as any)?.Plugins;
+  return (plugins?.FirebaseAuthentication as NativeFirebaseAuthPlugin | undefined) ?? null;
+}
+
 export async function signInWithGoogle(): Promise<void> {
   const firebase = ensureFirebase();
   if (!firebase) throw new Error('Cloud sync is not configured.');
@@ -96,6 +106,27 @@ export async function signInWithGoogle(): Promise<void> {
   provider.setCustomParameters({ prompt: 'select_account' });
 
   const isNativePlatform = Capacitor.isNativePlatform();
+  if (isNativePlatform) {
+    const nativeAuth = getNativeFirebaseAuthPlugin();
+    if (!nativeAuth?.signInWithGoogle) {
+      throw new Error(
+        'Android Google sign-in requires the Capacitor Firebase Authentication plugin. ' +
+        'Current webview redirect is blocked by Google (disallowed_useragent).',
+      );
+    }
+
+    const result = await nativeAuth.signInWithGoogle();
+    const idToken = result?.credential?.idToken ?? result?.idToken ?? null;
+    const accessToken = result?.credential?.accessToken ?? result?.accessToken ?? null;
+    if (!idToken && !accessToken) {
+      throw new Error('Native Google sign-in did not return an idToken/accessToken.');
+    }
+
+    const credential = GoogleAuthProvider.credential(idToken, accessToken ?? undefined);
+    await signInWithCredential(firebase.auth, credential);
+    return;
+  }
+
   const isLocalBrowserPreview = !isNativePlatform && ['127.0.0.1', 'localhost'].includes(window.location.hostname);
   if (isLocalBrowserPreview) {
     await signInWithPopup(firebase.auth, provider);

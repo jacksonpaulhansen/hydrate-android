@@ -1,5 +1,5 @@
 {
-  "androidDownloadUrl": "./hydrate-latest.apk",
+  "androidDownloadUrl": "https://jacksonpaulhansen.github.io/hydrate-android/hydrate-latest.apk",
   "github": {
     "owner": "jacksonpaulhansen",
     "repo": "hydrate-android",

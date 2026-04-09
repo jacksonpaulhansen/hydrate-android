@@ -270,7 +270,6 @@ function writeDownloadPage({ appName, webAppUrl, androidDownloadUrl, publishUrl 
       <h1>${safeAppName}</h1>
       <div class="actions">
         <a class="btn primary" href="${safeAndroidDownloadUrl}">Download APK</a>
-        <a class="btn" href="${safeWebAppUrl}">Back to Glasses</a>
       </div>
     </main>
   </body>
