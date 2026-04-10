@@ -99,6 +99,15 @@ function getNativeFirebaseAuthPlugin(): NativeFirebaseAuthPlugin | null {
   return (plugins?.FirebaseAuthentication as NativeFirebaseAuthPlugin | undefined) ?? null;
 }
 
+function isLikelyEmbeddedWebView(): boolean {
+  const ua = navigator.userAgent || '';
+  const hasWvToken = /\bwv\b/i.test(ua);
+  const hasAndroidWebViewToken = /; wv\)/i.test(ua);
+  const hasGenericWebViewToken = /webview/i.test(ua);
+  const hasEvenHubHint = /even[_\s-]?hub|evenrealities/i.test(ua);
+  return hasWvToken || hasAndroidWebViewToken || hasGenericWebViewToken || hasEvenHubHint;
+}
+
 export async function signInWithGoogle(): Promise<void> {
   const firebase = ensureFirebase();
   if (!firebase) throw new Error('Cloud sync is not configured.');
@@ -131,6 +140,13 @@ export async function signInWithGoogle(): Promise<void> {
   if (isLocalBrowserPreview) {
     await signInWithPopup(firebase.auth, provider);
     return;
+  }
+
+  if (isLikelyEmbeddedWebView()) {
+    throw new Error(
+      'Google sign-in is blocked in embedded webviews (disallowed_useragent). ' +
+      'Use a secure browser page or the Android companion app with native Firebase auth plugin enabled.',
+    );
   }
 
   await signInWithRedirect(firebase.auth, provider);
