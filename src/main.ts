@@ -2,7 +2,7 @@ import './style.css';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import { LocalNotifications } from '@capacitor/local-notifications';
-import type { User } from 'firebase/auth';
+// import type { User } from 'firebase/auth';  // BLE: firebase not used
 import {
   addEntry,
   clampInt,
@@ -15,6 +15,7 @@ import {
   type HydrateState,
   undoEntry,
 } from './hydrate-shared';
+/* BLE: cloud-sync commented out — replaced by ble-sync
 import {
   bootstrapCloudSync,
   fetchRemoteState,
@@ -25,6 +26,8 @@ import {
   signOutFromCloud,
   subscribeToRemoteState,
 } from './cloud-sync';
+*/
+import { startPhoneBleServer, type PhoneBleSyncHandle } from './ble-sync';
 
 const HIDE_DEBUG_TOOLS = true;
 const DEV_TOOLS_TOGGLE_SHORTCUT = 'Ctrl+Shift+D';
@@ -36,8 +39,9 @@ const state: HydrateState = loadHydrateState();
 
 let debugToolsVisible = !HIDE_DEBUG_TOOLS;
 let reminderTimer: number | null = null;
-let syncStatus = 'Waiting for cloud sync';
+let syncStatus = 'BLE sync — tap "Start BLE Server" to begin';
 let debugStatus = 'Ready';
+/* BLE: firebase auth state variables commented out
 let authStatus = isCloudSyncConfigured() ? 'Checking sign-in...' : 'Firebase config missing';
 let currentUser: User | null = null;
 let syncUnsubscribe: (() => void) | null = null;
@@ -45,6 +49,9 @@ let syncPollTimer: number | null = null;
 let lastRemoteSeenAt = '';
 let pushQueued = false;
 let pushRunning = false;
+*/
+let authStatus = 'BLE sync (no sign-in required)';
+let bleSyncHandle: PhoneBleSyncHandle | null = null;
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing #app root element');
@@ -195,100 +202,30 @@ function formatReminderTime(timestamp: number | null): string {
   return `Next reminder: ${new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 }
 
-function applyRemoteStateIfNewer(remoteState: HydrateState, sourceLabel: string): boolean {
-  const remoteTime = Date.parse(remoteState.lastModifiedAt || '');
-  const localTime = Date.parse(state.lastModifiedAt || '');
-  if (Number.isFinite(remoteTime) && Number.isFinite(localTime) && remoteTime <= localTime) {
-    return false;
-  }
-  Object.assign(state, remoteState);
-  saveHydrateState(state);
-  syncStatus = `Pulled latest changes from ${sourceLabel}`;
-  return true;
-}
+/* BLE: cloud sync functions commented out — replaced by BLE equivalents below
+function applyRemoteStateIfNewer(remoteState: HydrateState, sourceLabel: string): boolean { ... }
+async function flushCloudPush(): Promise<void> { ... }
+function queueCloudPush(reason: string): void { ... }
+async function pullRemoteState(reason: 'startup' | 'poll'): Promise<void> { ... }
+function stopCloudSync(): void { ... }
+async function startCloudSync(): Promise<void> { ... }
+*/
 
-async function flushCloudPush(): Promise<void> {
-  if (!currentUser || pushRunning || !pushQueued) return;
-  pushRunning = true;
-  pushQueued = false;
-  try {
-    await pushRemoteState(currentUser.uid, state, 'phone');
-    syncStatus = `Synced at ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
-  } catch (error) {
-    syncStatus = `Cloud push failed: ${String(error)}`;
-    pushQueued = true;
-  } finally {
-    pushRunning = false;
-    await render();
-  }
-}
-
+// BLE: called whenever local state changes; pushes to glasses via GATT notify
 function queueCloudPush(reason: string): void {
-  if (!currentUser) {
-    syncStatus = `${reason}. Sign in to sync`;
-    void render();
-    return;
+  syncStatus = reason;
+  if (bleSyncHandle) {
+    void bleSyncHandle.pushState(state)
+      .then(() => {
+        syncStatus = `BLE synced — ${reason}`;
+        return render();
+      })
+      .catch((error: unknown) => {
+        syncStatus = `BLE push failed: ${String(error)}`;
+        return render();
+      });
   }
-  pushQueued = true;
-  syncStatus = `${reason}. Sync queued`;
-  void flushCloudPush();
-}
-
-async function pullRemoteState(reason: 'startup' | 'poll'): Promise<void> {
-  if (!currentUser) return;
-  try {
-    const remote = await fetchRemoteState(currentUser.uid);
-    if (!remote) {
-      if (reason === 'startup') {
-        syncStatus = 'Signed in. Waiting for first synced change';
-      }
-      await render();
-      return;
-    }
-    lastRemoteSeenAt = remote.clientUpdatedAt;
-    if (applyRemoteStateIfNewer(remote.state, remote.source)) {
-      await scheduleReminder();
-    }
-  } catch (error) {
-    syncStatus = `Cloud fetch failed: ${String(error)}`;
-  }
-  await render();
-}
-
-function stopCloudSync(): void {
-  syncUnsubscribe?.();
-  syncUnsubscribe = null;
-  if (syncPollTimer !== null) {
-    window.clearInterval(syncPollTimer);
-    syncPollTimer = null;
-  }
-}
-
-async function startCloudSync(): Promise<void> {
-  stopCloudSync();
-  if (!currentUser) {
-    syncStatus = 'Sign in to sync with glasses';
-    await render();
-    return;
-  }
-
-  await pullRemoteState('startup');
-
-  syncUnsubscribe = subscribeToRemoteState(currentUser.uid, (remote) => {
-    if (!remote || remote.clientUpdatedAt === lastRemoteSeenAt) return;
-    lastRemoteSeenAt = remote.clientUpdatedAt;
-    if (applyRemoteStateIfNewer(remote.state, remote.source)) {
-      void scheduleReminder().then(render);
-    }
-  });
-
-  syncPollTimer = window.setInterval(() => {
-    void pullRemoteState('poll');
-  }, 5000);
-
-  if (state.lastModifiedAt && Date.parse(state.lastModifiedAt) > Date.parse(lastRemoteSeenAt || '1970-01-01T00:00:00.000Z')) {
-    queueCloudPush('Local state is newer');
-  }
+  void render();
 }
 
 function renderLog(): void {
@@ -451,9 +388,15 @@ async function render(): Promise<void> {
   authStatusLabel.textContent = authStatus;
   syncStatusLabel.textContent = syncStatus;
   debugStatusLabel.textContent = debugStatus;
+  /* BLE: firebase auth button state commented out
   signInBtn.textContent = currentUser ? 'Signed In' : 'Sign In With Google';
   signInBtn.disabled = !!currentUser || !isCloudSyncConfigured();
   signOutBtn.disabled = !currentUser;
+  */
+  signInBtn.textContent = bleSyncHandle ? 'BLE Active' : 'Start BLE Server';
+  signInBtn.disabled = !!bleSyncHandle;
+  signOutBtn.textContent = 'Stop BLE';
+  signOutBtn.disabled = !bleSyncHandle;
   debugToolsFieldset.style.display = debugToolsVisible ? '' : 'none';
   renderQuickAddButtons();
   renderLog();
@@ -568,6 +511,7 @@ async function init(): Promise<void> {
     queueCloudPush('Day reset in phone app');
     void scheduleReminder().then(render);
   });
+  /* BLE: Google sign-in handlers commented out
   signInBtn.addEventListener('click', () => {
     void signInWithGoogle().catch((error) => {
       authStatus = `Google sign-in failed: ${String(error)}`;
@@ -580,6 +524,39 @@ async function init(): Promise<void> {
       void render();
     });
   });
+  */
+  signInBtn.addEventListener('click', () => {
+    authStatus = 'Starting BLE server...';
+    void render();
+    void startPhoneBleServer((remoteState) => {
+      const remoteTime = Date.parse(remoteState.lastModifiedAt || '');
+      const localTime = Date.parse(state.lastModifiedAt || '');
+      if (!Number.isFinite(remoteTime) || (Number.isFinite(localTime) && remoteTime <= localTime)) return;
+      Object.assign(state, remoteState);
+      saveHydrateState(state);
+      syncStatus = 'Pulled state from glasses via BLE';
+      void scheduleReminder().then(render);
+    }).then((handle) => {
+      if (handle) {
+        bleSyncHandle = handle;
+        authStatus = 'BLE server running — glasses can now connect';
+        syncStatus = 'Waiting for glasses to connect';
+      } else {
+        authStatus = 'BLE not available (HydrateBle plugin missing)';
+      }
+      void render();
+    }).catch((error: unknown) => {
+      authStatus = `BLE start failed: ${String(error)}`;
+      void render();
+    });
+  });
+  signOutBtn.addEventListener('click', () => {
+    void bleSyncHandle?.stop();
+    bleSyncHandle = null;
+    authStatus = 'BLE server stopped';
+    syncStatus = 'BLE sync — tap "Start BLE Server" to begin';
+    void render();
+  });
   requestPermissionBtn.addEventListener('click', () => {
     void ensureNotificationPermission(true).then((allowed) => {
       debugStatus = allowed ? 'Notifications enabled' : 'Notifications denied';
@@ -590,6 +567,7 @@ async function init(): Promise<void> {
 
   await initAndroidBehavior();
 
+  /* BLE: Firebase bootstrap commented out
   const bootstrap = await bootstrapCloudSync();
   if (!bootstrap.configured) {
     authStatus = 'Firebase env vars are missing';
@@ -604,13 +582,13 @@ async function init(): Promise<void> {
       void render();
     });
   }
-
-  await scheduleReminder();
-  await render();
-
   if (currentUser) {
     await startCloudSync();
   }
+  */
+
+  await scheduleReminder();
+  await render();
 }
 
 void init();

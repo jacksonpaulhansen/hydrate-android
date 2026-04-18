@@ -9,7 +9,7 @@ import {
   TextContainerUpgrade,
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk';
-import type { User } from 'firebase/auth';
+// import type { User } from 'firebase/auth';  // BLE: firebase not used
 import {
   addEntry,
   clampInt,
@@ -22,6 +22,7 @@ import {
   type HydrateState,
   undoEntry,
 } from './hydrate-shared';
+/* BLE: cloud-sync commented out — replaced by ble-sync (Web Bluetooth)
 import {
   bootstrapCloudSync,
   fetchRemoteState,
@@ -32,6 +33,8 @@ import {
   signOutFromCloud,
   subscribeToRemoteState,
 } from './cloud-sync';
+*/
+import { connectGlassesBle, type GlassesBleSyncHandle } from './ble-sync';
 
 type InputAction = 'CLICK' | 'UP' | 'DOWN' | 'DOUBLE_CLICK';
 
@@ -53,12 +56,13 @@ let bridge: EvenAppBridge | null = null;
 let bridgeStatus = 'Connecting to Even Hub bridge...';
 let deviceStatus = 'Waiting for glasses status';
 let hudStatus = 'HUD not pushed yet';
-let syncStatus = 'Waiting for cloud sync';
+let syncStatus = 'BLE sync - tap "Connect to Phone" to pair';
 let debugVisible = !HIDE_DEBUG_TOOLS;
 let launchSourceLabel = 'unknown';
 let recentEventLines: string[] = ['Hydrate glasses companion booting'];
 let pushInFlight = false;
 let startupCreated = false;
+/* BLE: firebase auth state variables commented out
 let authStatus = isCloudSyncConfigured() ? 'Checking sign-in...' : 'Firebase config missing';
 let currentUser: User | null = null;
 let syncUnsubscribe: (() => void) | null = null;
@@ -66,6 +70,9 @@ let syncPollTimer: number | null = null;
 let lastRemoteSeenAt = '';
 let cloudPushQueued = false;
 let cloudPushRunning = false;
+*/
+let authStatus = 'BLE sync - tap "Connect to Phone" to pair';
+let bleSyncHandle: GlassesBleSyncHandle | null = null;
 let lastResolvedAction: InputAction | null = null;
 let lastResolvedActionAt = 0;
 let lastEventSignature = '';
@@ -171,16 +178,16 @@ app.innerHTML = `
     </fieldset>
 
     <fieldset class="group-box">
-      <legend>Account & Auto Sync</legend>
+      <legend>Phone Sync</legend>
       <div class="controls">
-        <button id="sign-in-btn" type="button">Sign In With Google</button>
-        <button id="sign-out-btn" type="button">Sign Out</button>
+        <button id="sign-in-btn" type="button">Connect to Phone</button>
+        <button id="sign-out-btn" type="button">Disconnect BLE</button>
       </div>
       <div class="controls controls-right">
         <button id="download-apk-btn" type="button">Download APK</button>
       </div>
       <div id="auth-status" class="muted-copy"></div>
-      <p class="hint">Sign into the same Google account as the phone app. Hydration changes sync on open and then poll every 5 seconds.</p>
+      <p class="hint">Use Web Bluetooth to connect directly to the phone app and sync hydration state in real time.</p>
     </fieldset>
 
     <fieldset id="debug-tools" class="group-box" ${HIDE_DEBUG_TOOLS ? 'style="display:none;"' : ''}>
@@ -286,6 +293,7 @@ function buildMainHudText(): string {
   ].join('\n');
 }
 
+/* BLE: applyRemoteStateIfNewer commented out — no longer used with cloud sync removed
 function applyRemoteStateIfNewer(remoteState: HydrateState, sourceLabel: string): boolean {
   const remoteTime = Date.parse(remoteState.lastModifiedAt || '');
   const localTime = Date.parse(state.lastModifiedAt || '');
@@ -297,6 +305,7 @@ function applyRemoteStateIfNewer(remoteState: HydrateState, sourceLabel: string)
   syncStatus = `Pulled latest changes from ${sourceLabel}`;
   return true;
 }
+*/
 
 async function pushHudToGlasses(reason: string): Promise<void> {
   if (!bridge || pushInFlight) return;
@@ -350,31 +359,29 @@ async function pushHudToGlasses(reason: string): Promise<void> {
   }
 }
 
-async function flushCloudPush(): Promise<void> {
-  if (!currentUser || cloudPushRunning || !cloudPushQueued) return;
-  cloudPushRunning = true;
-  cloudPushQueued = false;
-  try {
-    await pushRemoteState(currentUser.uid, state, 'glasses');
-    syncStatus = `Synced at ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
-  } catch (error) {
-    syncStatus = `Cloud push failed: ${String(error)}`;
-    cloudPushQueued = true;
-  } finally {
-    cloudPushRunning = false;
-    await render();
-  }
-}
+/* BLE: cloud sync functions commented out — replaced by BLE equivalents below
+async function flushCloudPush(): Promise<void> { ... }
+function queueCloudPush(reason: string): void { ... }
+async function pullRemoteState(reason: 'startup' | 'poll'): Promise<void> { ... }
+function stopCloudSync(): void { ... }
+async function startCloudSync(): Promise<void> { ... }
+*/
 
+// BLE: push local state to phone via GATT write then refresh HUD
 function queueCloudPush(reason: string): void {
-  if (!currentUser) {
-    syncStatus = `${reason}. Sign in to sync`;
-    void render();
-    return;
+  syncStatus = reason;
+  if (bleSyncHandle) {
+    void bleSyncHandle.pushState(state)
+      .then(() => {
+        syncStatus = `BLE synced — ${reason}`;
+        return render();
+      })
+      .catch((error: unknown) => {
+        syncStatus = `BLE push failed: ${String(error)}`;
+        return render();
+      });
   }
-  cloudPushQueued = true;
-  syncStatus = `${reason}. Sync queued`;
-  void flushCloudPush();
+  void render();
 }
 
 async function syncHud(reason: string): Promise<void> {
@@ -382,63 +389,6 @@ async function syncHud(reason: string): Promise<void> {
   queueCloudPush(reason);
   await render();
   await pushHudToGlasses(reason);
-}
-
-async function pullRemoteState(reason: 'startup' | 'poll'): Promise<void> {
-  if (!currentUser) return;
-  try {
-    const remote = await fetchRemoteState(currentUser.uid);
-    if (!remote) {
-      if (reason === 'startup') {
-        syncStatus = 'Signed in. Waiting for first synced change';
-      }
-      await render();
-      return;
-    }
-    lastRemoteSeenAt = remote.clientUpdatedAt;
-    if (applyRemoteStateIfNewer(remote.state, remote.source)) {
-      await pushHudToGlasses('cloud sync');
-    }
-  } catch (error) {
-    syncStatus = `Cloud fetch failed: ${String(error)}`;
-  }
-  await render();
-}
-
-function stopCloudSync(): void {
-  syncUnsubscribe?.();
-  syncUnsubscribe = null;
-  if (syncPollTimer !== null) {
-    window.clearInterval(syncPollTimer);
-    syncPollTimer = null;
-  }
-}
-
-async function startCloudSync(): Promise<void> {
-  stopCloudSync();
-  if (!currentUser) {
-    syncStatus = 'Sign in to sync with phone';
-    await render();
-    return;
-  }
-
-  await pullRemoteState('startup');
-
-  syncUnsubscribe = subscribeToRemoteState(currentUser.uid, (remote) => {
-    if (!remote || remote.clientUpdatedAt === lastRemoteSeenAt) return;
-    lastRemoteSeenAt = remote.clientUpdatedAt;
-    if (applyRemoteStateIfNewer(remote.state, remote.source)) {
-      void pushHudToGlasses('cloud listener').then(render);
-    }
-  });
-
-  syncPollTimer = window.setInterval(() => {
-    void pullRemoteState('poll');
-  }, 5000);
-
-  if (state.lastModifiedAt && Date.parse(state.lastModifiedAt) > Date.parse(lastRemoteSeenAt || '1970-01-01T00:00:00.000Z')) {
-    queueCloudPush('Local glasses state is newer');
-  }
 }
 
 async function refreshDeviceInfo(): Promise<void> {
@@ -564,9 +514,15 @@ async function render(): Promise<void> {
   runtimeDetail.textContent = `Launch source: ${launchSourceLabel}. ${bridge ? 'Bridge ready for HUD updates.' : 'Running in browser preview mode.'}`;
   runtimeCard.className = `runtime-card ${bridge ? 'runtime-even-hub' : 'runtime-browser'}`;
   runtimeBadge.textContent = bridge ? 'HUD Live' : 'Preview';
+  /* BLE: firebase auth button state commented out
   signInBtn.textContent = currentUser ? 'Signed In' : 'Sign In With Google';
   signInBtn.disabled = !!currentUser || !isCloudSyncConfigured();
   signOutBtn.disabled = !currentUser;
+  */
+  signInBtn.textContent = bleSyncHandle ? 'BLE Connected' : 'Connect to Phone';
+  signInBtn.disabled = !!bleSyncHandle;
+  signOutBtn.textContent = 'Disconnect BLE';
+  signOutBtn.disabled = !bleSyncHandle;
   publishStatusLabel.textContent = publishState;
   publishBtn.textContent = deployed ? 'Update App' : 'Publish App';
   dailyGoalInput.value = String(state.dailyGoalMl);
@@ -984,18 +940,52 @@ async function init(): Promise<void> {
     void exitGlassesApp();
   });
 
+  /* BLE: Google sign-in handlers commented out
   signInBtn.addEventListener('click', () => {
     void signInWithGoogle().catch((error) => {
       authStatus = `Google sign-in failed: ${String(error)}`;
       void render();
     });
   });
-
   signOutBtn.addEventListener('click', () => {
     void signOutFromCloud().catch((error) => {
       authStatus = `Sign out failed: ${String(error)}`;
       void render();
     });
+  });
+  */
+  signInBtn.addEventListener('click', () => {
+    authStatus = 'Scanning for Hydrate phone...';
+    void render();
+    void connectGlassesBle((remoteState) => {
+      const remoteTime = Date.parse(remoteState.lastModifiedAt || '');
+      const localTime = Date.parse(state.lastModifiedAt || '');
+      if (!Number.isFinite(remoteTime) || (Number.isFinite(localTime) && remoteTime <= localTime)) return;
+      Object.assign(state, remoteState);
+      saveHydrateState(state);
+      syncStatus = 'Pulled state from phone via BLE';
+      void pushHudToGlasses('ble sync').then(render);
+    }).then((handle) => {
+      if (handle) {
+        bleSyncHandle = handle;
+        authStatus = 'BLE connected to phone';
+        syncStatus = 'BLE sync active';
+      } else {
+        authStatus = 'Web Bluetooth not available in this environment';
+      }
+      void render();
+    }).catch((error: unknown) => {
+      authStatus = `BLE connect failed: ${String(error)}`;
+      void render();
+    });
+  });
+
+  signOutBtn.addEventListener('click', () => {
+    bleSyncHandle?.stop();
+    bleSyncHandle = null;
+    authStatus = 'BLE disconnected';
+    syncStatus = 'BLE sync - tap "Connect to Phone" to pair';
+    void render();
   });
 
   refreshDeviceBtn.addEventListener('click', () => {
@@ -1016,21 +1006,6 @@ async function init(): Promise<void> {
     void buildEhpk();
   });
 
-  const bootstrap = await bootstrapCloudSync();
-  if (!bootstrap.configured) {
-    authStatus = 'Firebase env vars are missing';
-    syncStatus = 'Auto sync disabled until Firebase is configured';
-  } else {
-    currentUser = bootstrap.user;
-    authStatus = currentUser?.email || currentUser?.displayName || 'Ready to sign in';
-    listenForUserChange((user) => {
-      currentUser = user;
-      authStatus = user?.email || user?.displayName || 'Signed out';
-      void startCloudSync();
-      void render();
-    });
-  }
-
   try {
     const health = await fetch(`${CONTROL_URL}/health`, { cache: 'no-store' });
     const info = await health.json().catch(() => null) as { capabilities?: string[]; version?: string } | null;
@@ -1049,9 +1024,6 @@ async function init(): Promise<void> {
 
   await render();
   await connectBridge();
-  if (currentUser) {
-    await startCloudSync();
-  }
 }
 
 void init();

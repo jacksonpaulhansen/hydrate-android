@@ -38,4 +38,14 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- BLE peripheral (GATT server + advertising). BLUETOOTH_ADVERTISE is API 31+;
+         older API levels use BLUETOOTH_ADMIN which is declared by the BLE Capacitor plugin. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"
+        android:minSdkVersion="31" />
+    <!-- Legacy BLE support for API < 31 (merges with the BLE plugin's declarations) -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
 </manifest>
