@@ -43,6 +43,8 @@
          older API levels use BLUETOOTH_ADMIN which is declared by the BLE Capacitor plugin. -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"
         android:minSdkVersion="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"
+        android:minSdkVersion="31" />
     <!-- Legacy BLE support for API < 31 (merges with the BLE plugin's declarations) -->
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />

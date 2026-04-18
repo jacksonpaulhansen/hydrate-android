@@ -1,5 +1,6 @@
 package com.hydrate.app;
 
+import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -14,13 +15,17 @@ import android.bluetooth.le.AdvertiseData;
 import android.bluetooth.le.AdvertiseSettings;
 import android.bluetooth.le.BluetoothLeAdvertiser;
 import android.content.Context;
+import android.os.Build;
 import android.os.ParcelUuid;
 
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -28,7 +33,18 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
-@CapacitorPlugin(name = "HydrateBle")
+@CapacitorPlugin(
+        name = "HydrateBle",
+        permissions = {
+                @Permission(
+                        alias = "ble",
+                        strings = {
+                                Manifest.permission.BLUETOOTH_CONNECT,
+                                Manifest.permission.BLUETOOTH_ADVERTISE
+                        }
+                )
+        }
+)
 public class HydrateBlePlugin extends Plugin {
 
     private static final UUID SERVICE_UUID     = UUID.fromString("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
@@ -106,6 +122,28 @@ public class HydrateBlePlugin extends Plugin {
 
     @PluginMethod
     public void startServer(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && getPermissionState("ble") != PermissionState.GRANTED) {
+            requestPermissionForAlias("ble", call, "onBlePermissionResult");
+            return;
+        }
+        doStartServer(call);
+    }
+
+    @PermissionCallback
+    private void onBlePermissionResult(PluginCall call) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                || getPermissionState("ble") == PermissionState.GRANTED) {
+            doStartServer(call);
+            return;
+        }
+        call.reject("Bluetooth permissions denied");
+    }
+
+    private void doStartServer(PluginCall call) {
+        try {
+            stopServerInternal();
+
         Context context = getContext();
         BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
         if (manager == null) {
@@ -174,10 +212,22 @@ public class HydrateBlePlugin extends Plugin {
         };
 
         advertiser.startAdvertising(settings, data, advertiseCallback);
+        } catch (SecurityException se) {
+            stopServerInternal();
+            call.reject("BLE permission error: " + se.getMessage(), se);
+        } catch (Exception ex) {
+            stopServerInternal();
+            call.reject("BLE server start failed: " + ex.getMessage(), ex);
+        }
     }
 
     @PluginMethod
     public void stopServer(PluginCall call) {
+        stopServerInternal();
+        call.resolve();
+    }
+
+    private void stopServerInternal() {
         if (advertiser != null && advertiseCallback != null) {
             try { advertiser.stopAdvertising(advertiseCallback); } catch (Exception ignored) {}
             advertiser = null;
@@ -188,7 +238,6 @@ public class HydrateBlePlugin extends Plugin {
             gattServer = null;
         }
         connectedDevices.clear();
-        call.resolve();
     }
 
     @PluginMethod
